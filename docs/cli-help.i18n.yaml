@@ -1,0 +1,37 @@
+# Bilingual-pair consistency record for cli-help.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/cli-help.md
+/:
+  en: d11ca88bdc409249
+  zh: d11ca88bdc409249
+/dsh-cli-help:
+  en: b7174eab3476579d
+  zh: 5ddab967320e3cff
+/dsh-cli-help/contents:
+  en: 9690aefc7b18ae81
+  zh: a5e07948ef90fa5a
+/dsh-cli-help/dsh:
+  en: e0695abcf7d8b521
+  zh: 712c23b3c8a115ca
+/dsh-cli-help/dsh-plugin:
+  en: adad99c125d0ac51
+  zh: f11024971184f737
+/dsh-cli-help/dsh-acp:
+  en: 6cfa5bfe28d5b549
+  zh: 72ba74a21c3dc966
+/dsh-cli-help/dsh-daemon:
+  en: 922c4fe629ea0607
+  zh: c8a4d7fdf47d978c
+/dsh-cli-help/dsh-headless:
+  en: 878a1dd78017964d
+  zh: bb43d91b4beb9bda
+/dsh-cli-help/dsh-sdk:
+  en: 701f239c5157dedb
+  zh: ee11be2932b05ce4
+/dsh-cli-help/dsh-sdk-minimal:
+  en: 02dd5b6dfa5bb4c8
+  zh: e9185272117bf5f2
+/dsh-cli-help/dsh-tui:
+  en: aa23756bc7bbd831
+  zh: 8a02c413cbc4e7dc

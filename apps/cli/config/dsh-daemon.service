@@ -1,0 +1,32 @@
+[Unit]
+Description=DeepSeek Harness daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dsh
+Group=dsh
+WorkingDirectory=/srv/dsh/workspace
+StateDirectory=dsh
+Environment=HOME=/var/lib/dsh
+Environment=DSH_HOME=/var/lib/dsh
+Environment=DSH_DAEMON_WORKSPACE=/srv/dsh/workspace
+Environment=DSH_DAEMON_TOKEN_FILE=%d/daemon-token
+Environment=DSH_TELEMETRY_DISABLED=1
+EnvironmentFile=-/etc/dsh/provider.env
+LoadCredential=daemon-token:/etc/dsh/daemon-token
+ExecStart=/usr/bin/node /opt/deepseek-harness/apps/cli/lib/bin.js daemon --port 3080 --trusted-host dsh.example.com
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=45
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/dsh/workspace
+
+[Install]
+WantedBy=multi-user.target

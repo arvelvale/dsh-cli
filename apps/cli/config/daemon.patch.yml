@@ -1,0 +1,27 @@
+# Loopback Host for SSH and a TLS reverse proxy.
+- id: webserver
+  config:
+    host: '127.0.0.1'
+    port: !!js ctx.webStartup.port ?? 3080
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
+
+- id: web-runtime
+  config:
+    openBrowser: false
+    printUrl: false
+    surfaceContext: false
+    serveFrontend: false
+    daemonWorkspaceRoot: !!js process.env.DSH_DAEMON_WORKSPACE
+
+- id: connection
+  config:
+    trustedHosts: !!js ctx.webStartup.trustedHosts
+    bearerTokenFile: !!js process.env.DSH_DAEMON_TOKEN_FILE ?? ''
+
+- id: modules
+  disabled: true
+
+- id: client-hmr
+  disabled: true

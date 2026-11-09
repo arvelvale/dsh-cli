@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "DeepSeek Harness Remote",
+    "slug": "dsh-remote",
+    "version": "0.2.2",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "android": { "package": "com.deepseekharness.remote" },
+    "ios": { "bundleIdentifier": "com.deepseekharness.remote" },
+    "plugins": ["expo-secure-store"]
+  }
+}
