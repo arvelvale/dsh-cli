@@ -12,7 +12,7 @@ StateDirectory=dsh
 Environment=HOME=/var/lib/dsh
 Environment=DSH_HOME=/var/lib/dsh
 Environment=DSH_DAEMON_WORKSPACE=/srv/dsh/workspace
-Environment=DSH_DAEMON_TOKEN_FILE=%d/daemon-token
+Environment=DSH_DAEMON_TOKEN_FILE=/run/credentials/%n/daemon-token
 Environment=DSH_TELEMETRY_DISABLED=1
 EnvironmentFile=-/etc/dsh/provider.env
 LoadCredential=daemon-token:/etc/dsh/daemon-token

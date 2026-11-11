@@ -104,16 +104,31 @@ echo "==> 8/8 启动服务"
 systemctl enable dsh-daemon
 systemctl restart dsh-daemon
 systemctl restart caddy
-sleep 3
+TOKEN="$(cat /etc/dsh/daemon-token)"
+CHECK_REQUEST='{"type":"client-request","method":"session/list","rpcId":"deploy-check","payload":{"args":{"_request":{}}}}'
+READY=0
+for ((attempt = 0; attempt < 60; attempt++)); do
+  if curl -fsS --connect-timeout 2 --max-time 3 \
+    -H "Host: ${DOMAIN}" -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' --data "$CHECK_REQUEST" \
+    http://127.0.0.1:3080/api/session/list 2>/dev/null \
+    | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("result", {}).get("ok") is True else 1)' 2>/dev/null; then
+    READY=1
+    break
+  fi
+  sleep 2
+done
+if [[ "$READY" != 1 ]]; then
+  echo "Daemon 鉴权接口未就绪。请检查 journalctl -u dsh-daemon -n 50" >&2
+  exit 1
+fi
 systemctl is-active dsh-daemon
 systemctl is-active caddy
-
-TOKEN="$(cat /etc/dsh/daemon-token)"
 echo
 echo "==> 自检（证书首次签发需要公网 80 可达，可能要等 1-2 分钟）"
 curl -sS --fail --resolve "${DOMAIN}:443:127.0.0.1" \
   -X POST -H 'Content-Type: application/json' \
-  --data '{"type":"client-request","method":"session/list","rpcId":"deploy-check","payload":{"args":{"_request":{}}}}' \
+  --data "$CHECK_REQUEST" \
   -H "Authorization: Bearer ${TOKEN}" \
   "https://${DOMAIN}/api/session/list" | head -c 300 \
   || echo "（暂时不可用：查看 journalctl -u caddy -u dsh-daemon -n 50）"

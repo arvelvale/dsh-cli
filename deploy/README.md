@@ -114,6 +114,8 @@ Caddy 自动向 Let's Encrypt 申请并续期证书，0 元。
 
 覆盖 systemd unit 与 Caddyfile 前，脚本会备份现有文件到 `/opt/dsh/backups/setup-<UTC时间>/`。配置文件保持 `0644`，Token 与模型凭证保持 `0600`；重复执行会重启 daemon 使配置生效。
 
+Ubuntu 22.04 的 systemd 249 使用 `/run/credentials/%n/daemon-token` 作为凭据路径，避免依赖新版 `%d` 展开。启动后以鉴权 `session/list` RPC 返回成功作为就绪条件；仅进程处于 active 不代表 Host 已经加载完成。
+
 **运行方式**：systemd 用 `node --import tsx/esm apps/cli/src/dsh-cli.ts daemon ...` 直接跑源码，
 而不是 `pnpm run build` 产物。完整 build 会编译 native addon 并构建 Web/Desktop，
 在 2 核 8GB 上耗时长且易失败；源码 + tsx 这条路径已在本机 Node 24 下真实跑通过 TUI。
