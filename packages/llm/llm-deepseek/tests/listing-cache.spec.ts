@@ -206,7 +206,7 @@ const badgedListing = (text: string): ModelListing => ({
 
 it('automatically publishes replacement badges and their removal without another read', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-  const { catalog, loads, changed, flush, advance } = harness()
+  const { catalog, loads, changed, info, flush, advance } = harness()
   const first = catalog.view()
   await flush()
   loads[0]!.settle.resolve(badgedListing('New'))
@@ -222,6 +222,7 @@ it('automatically publishes replacement badges and their removal without another
   }
   expect(loads).toHaveLength(3)
   expect(changed).toHaveBeenCalledTimes(3)
+  expect(info).toHaveBeenCalledTimes(3)
 })
 
 it.each(['failure', 'timeout'] as const)('retains badges after refresh %s and replaces them after recovery', async (failure) => {
@@ -260,7 +261,7 @@ it.each(['failure', 'timeout'] as const)('retains badges after refresh %s and re
 
 it('does not notify for identical listings and stops its timer on disposal', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-  const { catalog, loads, changed, flush, advance } = harness()
+  const { catalog, loads, changed, info, flush, advance } = harness()
   const first = catalog.view()
   await flush()
   loads[0]!.settle.resolve(badgedListing('New'))
@@ -270,6 +271,7 @@ it('does not notify for identical listings and stops its timer on disposal', asy
   loads[1]!.settle.resolve(badgedListing('New'))
   await flush()
   expect(changed).toHaveBeenCalledTimes(1)
+  expect(info).toHaveBeenCalledTimes(1)
   await catalog.dispose()
   advance(1000)
   await vi.advanceTimersByTimeAsync(1000)

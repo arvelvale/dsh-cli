@@ -1,8 +1,13 @@
 /** HTTP RPC and live Session follow over the DSH Gateway's native wire protocol. */
 
 import type {
+  DirectoryListing,
+  FilePreview,
+  McpProbeValue,
+  McpServerView,
   ModelCatalog,
   ModelSelection,
+  PlanDocument,
   PromptContentPart,
   SessionAddress,
   SessionEventsPage,
@@ -10,7 +15,14 @@ import type {
   SessionListValue,
   SessionOpening,
   SessionEvent,
+  SessionSearchValue,
+  SettingsDescribeValue,
+  SettingsNamespaceView,
+  SkillListValue,
 } from './remote-contract.ts'
+
+const MCP_SETTINGS_MARK = 'dsh-mcp-manager'
+const MCP_NAMESPACE = `@deepseek-ai/${MCP_SETTINGS_MARK}`
 
 const DEEPSEEK_API_KEY_REF = 'DEEPSEEK_API_KEY'
 
@@ -150,6 +162,15 @@ export class RemoteClient {
   }
 
   /**
+   * Interrupt the active Agent turn without discarding its queued input.
+   * @param sessionId - Session whose current turn should stop.
+   * @returns the Host acknowledgement.
+   */
+  cancel(sessionId: string): Promise<{ readonly accepted: true }> {
+    return this.rpc('session/cancel', { request: { sessionId } })
+  }
+
+  /**
    * @param sessionId - Session that will own the resulting receipt.
    * @param body - raw bytes of the image.
    * @param mediaType - image type verified again by the Host.
@@ -276,6 +297,158 @@ export class RemoteClient {
     readonly headers: Readonly<Record<string, string>>
   } {
     return { url: `${this.base}/api/daemon.files?mode=${mode}&path=${encodeURIComponent(path)}`, headers: this.headers }
+  }
+
+  /** @returns user-invocable Skills visible to one Session's cwd and preset. */
+  skills(sessionId: string): Promise<SkillListValue> {
+    return this.rpc('skills/list', { request: { sessionId } })
+  }
+
+  /**
+   * Read the first full snapshot of `mcpManager/watch` without keeping a subscription.
+   * @param signal - cancellation of the terminal application.
+   * @returns one row per configured or retained MCP server.
+   */
+  async mcpServers(signal?: AbortSignal): Promise<readonly McpServerView[]> {
+    const first = await this.streamOnce<unknown>('mcpManager/watch', {}, signal)
+    if (!Array.isArray(first)) throw new Error('Host 返回了无效的 MCP 服务列表')
+    return first.filter(isRecord).map(item => ({
+      name: typeof item.name === 'string' ? item.name : '',
+      configured: item.configured === true,
+      status: isRecord(item.status) ? item.status : {},
+    })).filter(item => item.name !== '')
+  }
+
+  /**
+   * @param name - configured MCP server key.
+   * @returns the Host acknowledgement after it schedules a fresh connection.
+   */
+  mcpRestart(name: string): Promise<void> {
+    return this.rpc('mcpManager/restart', { name })
+  }
+
+  /** @returns the staged connection probe for one MCP server. */
+  mcpProbe(name: string): Promise<McpProbeValue> {
+    return this.rpc('mcpManager/probe', { name })
+  }
+
+  /** @returns every Settings namespace with redacted values and revisions. */
+  settingsDescribe(): Promise<SettingsDescribeValue> {
+    return this.rpc('settings/describe', {})
+  }
+
+  /**
+   * Flip one MCP server's Volatile `enabled` flag, preserving its profile revision.
+   * The manager's watch stream publishes the resulting status change.
+   * @param name - configured MCP server key.
+   * @param enabled - whether the server should run.
+   */
+  async setMcpEnabled(name: string, enabled: boolean): Promise<void> {
+    const { namespaces, writable } = await this.settingsDescribe()
+    if (!writable) throw new Error('当前 Host 配置只读，无法启用或停用 MCP 服务')
+    const namespace: SettingsNamespaceView | undefined = namespaces.find(item =>
+      item.ns === MCP_NAMESPACE || item.ns.includes(MCP_SETTINGS_MARK))
+    if (namespace === undefined) throw new Error('Host 未挂载 MCP 配置命名空间')
+    await this.rpc('settings/mutate', {
+      ns: namespace.ns,
+      ops: [{ op: 'set', path: ['servers', name, 'enabled'], value: enabled }],
+      expectedRevision: namespace.revision,
+    })
+  }
+
+  /**
+   * @param query - free-text Session search.
+   * @returns matching Sessions with short snippets.
+   */
+  searchSessions(query: string): Promise<SessionSearchValue> {
+    return this.rpc('session/search', { request: { query } })
+  }
+
+  /**
+   * Find the most recent `exit_plan_mode` tool call in the durable journal.
+   * @param sessionId - Session whose history is paged backwards.
+   * @param pages - maximum number of history pages to inspect.
+   * @returns the submitted Markdown plan, or undefined when none was logged.
+   */
+  async planDocument(sessionId: string, pages = 6): Promise<PlanDocument | undefined> {
+    const address = { kind: 'session', sessionId } as SessionAddress
+    let page = await this.rpc<SessionEventsPage>('session/events', {
+      request: { address, maxMessages: 30 },
+    })
+    const throughSeq = page.cursor
+    for (let depth = 0; depth < pages; depth += 1) {
+      for (let index = page.records.length - 1; index >= 0; index -= 1) {
+        const plan = submittedPlan(page.records[index]?.event)
+        if (plan !== undefined) return plan
+      }
+      const beforeSeq = page.records[0]?.event.seq
+      if (!page.hasMore || beforeSeq === undefined || !Number.isFinite(throughSeq)) return undefined
+      page = await this.rpc<SessionEventsPage>('session/events', {
+        request: { address, throughSeq, beforeSeq, maxMessages: 30 },
+      })
+    }
+    return undefined
+  }
+
+  /**
+   * Read the protected workspace file route used by the Desktop file tree.
+   * @param path - relative workspace path, or empty for its root.
+   * @param mode - directory listing or UTF-8 text preview.
+   * @returns decoded JSON from the Host.
+   */
+  async workspaceFiles(path: string, mode: 'list' | 'preview'): Promise<DirectoryListing | FilePreview> {
+    const query = new URLSearchParams({ mode, path })
+    const response = await fetch(`${this.base}/api/daemon.files?${query}`, {
+      headers: this.headers,
+      redirect: 'error',
+    })
+    if (!response.ok) throw new RemoteFailure(String(response.status), `文件读取失败（HTTP ${response.status}）`)
+    return response.json() as Promise<DirectoryListing | FilePreview>
+  }
+
+  /**
+   * Open a Host Remote stream over the Gateway mux and settle on its first item.
+   * @param endpoint - exact stream endpoint name.
+   * @param args - named arguments for the stream.
+   * @param signal - cancellation of the terminal application.
+   * @returns the first streamed value.
+   */
+  private streamOnce<T>(endpoint: string, args: object, signal?: AbortSignal): Promise<T> {
+    const streamId = this.platform.id()
+    const socket = this.platform.socket(`${this.base.replace(/^http/u, 'ws')}/api/remote.mux`, this.headers)
+    return new Promise<T>((resolve, reject) => {
+      let settled = false
+      const finish = (error?: Error, value?: T): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        signal?.removeEventListener('abort', abort)
+        socket.close()
+        if (error !== undefined) reject(error)
+        else resolve(value as T)
+      }
+      const abort = (): void => { finish(new Error('已取消')) }
+      const timeout = setTimeout(() => { finish(new Error('Host 数据流超时')) }, 10_000)
+      signal?.addEventListener('abort', abort, { once: true })
+      socket.addEventListener('open', () => {
+        socket.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }))
+      })
+      socket.addEventListener('close', () => { finish(new Error('DSH WebSocket disconnected')) })
+      socket.addEventListener('error', () => { finish(new Error('DSH WebSocket failed')) })
+      socket.addEventListener('message', (event) => {
+        try {
+          if (typeof event.data !== 'string') throw new Error('Expected a DSH WebSocket text frame')
+          const message: unknown = JSON.parse(event.data)
+          if (!isRecord(message)) throw new Error('Invalid DSH WebSocket frame')
+          if (message.type === 'error') throw failure(message.error)
+          if (message.type === 'end' || message.streamId !== streamId) return
+          if (message.type !== 'item' || message.value === undefined) return
+          finish(undefined, message.value as T)
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)))
+        }
+      })
+    })
   }
 
   /**
@@ -419,6 +592,25 @@ export class RemoteClient {
     }
     return pages.reverse().flat().filter(event => event.seq > after)
   }
+}
+
+/** Rebuild a submitted plan from an untrusted logged tool-call argument. */
+function submittedPlan(event: SessionEvent | undefined): PlanDocument | undefined {
+  if (event === undefined || !['tool/call', 'tool/ptc-dispatch-start', 'tool/ptc-dispatch'].includes(event.type)) return undefined
+  const data = event.data
+  if (!isRecord(data) || data.name !== 'exit_plan_mode') return undefined
+  const callId = event.type === 'tool/call' ? data.callId : data.subCallId
+  if (typeof callId !== 'string' || callId === '') return undefined
+  let args: unknown = data.arguments
+  if (event.type === 'tool/call') {
+    if (typeof args !== 'string') return undefined
+    try { args = JSON.parse(args) as unknown }
+    catch { return undefined }
+  }
+  if (!isRecord(args) || typeof args.plan !== 'string') return undefined
+  const markdown = args.plan
+  const title = /^#\s+(\S[^\r\n]*)/u.exec(markdown.trim())?.[1]
+  return title === undefined ? undefined : { callId, markdown, title }
 }
 
 function failure(error: unknown): RemoteFailure {

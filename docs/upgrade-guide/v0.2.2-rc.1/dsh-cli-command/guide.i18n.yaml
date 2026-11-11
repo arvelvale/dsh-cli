@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.2-rc.1/dsh-cli-command/guide.md
+/:
+  en: 501f8cae4cadf900
+  zh: d1c4abe80bdf7709
+/launch-dsh-cli-with-dsh-cli:
+  en: af0ea9510cf62fe8
+  zh: 9b0b9b60cbd44639
+/launch-dsh-cli-with-dsh-cli/change:
+  en: 8b9cd0cc499eb19b
+  zh: 7e3902b6dc3ff714
+/launch-dsh-cli-with-dsh-cli/migration:
+  en: 9addf9cd81ec64df
+  zh: 5cd89c4ab16953f1

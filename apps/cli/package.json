@@ -12,7 +12,7 @@
   },
   "type": "module",
   "bin": {
-    "dsh": "lib/bin.js"
+    "dsh-cli": "lib/dsh-cli.js"
   },
   "files": [
     "config/daemon.patch.yml",

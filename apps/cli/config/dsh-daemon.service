@@ -16,7 +16,7 @@ Environment=DSH_DAEMON_TOKEN_FILE=%d/daemon-token
 Environment=DSH_TELEMETRY_DISABLED=1
 EnvironmentFile=-/etc/dsh/provider.env
 LoadCredential=daemon-token:/etc/dsh/daemon-token
-ExecStart=/usr/bin/node /opt/deepseek-harness/apps/cli/lib/bin.js daemon --port 3080 --trusted-host dsh.example.com
+ExecStart=/usr/bin/node /opt/deepseek-harness/apps/cli/lib/dsh-cli.js daemon --port 3080 --trusted-host dsh.example.com
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=45

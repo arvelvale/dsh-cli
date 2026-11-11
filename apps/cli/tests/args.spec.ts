@@ -99,7 +99,7 @@ describe('parseDshArgs', () => {
   it.each([['tui', '--version'], ['--profile', 'tui', '-V']])('prints the terminal client version for %j', (...argv) => {
     const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true)
     expect(exitCode(argv)).toBe(0)
-    expect(stdout).toHaveBeenCalledWith('0.0.1\n')
+    expect(stdout).toHaveBeenCalledWith('0.0.2\n')
   })
 
   it.each([

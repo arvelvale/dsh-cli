@@ -1,0 +1,12 @@
+__DOMAIN__ {
+    @api path /api/*
+    handle @api {
+        reverse_proxy 127.0.0.1:3080 {
+            flush_interval -1
+            header_up Host {http.request.host}
+        }
+    }
+    handle {
+        respond "Not found" 404
+    }
+}

@@ -2,7 +2,7 @@
 
 import { spawn } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,7 +15,7 @@ import { RemoteClient, type RemoteApproval, type RemoteWatch } from '../src/remo
 import type { SessionEvent } from '../src/remote-contract.ts'
 import { displayRows } from '../src/remote-presentation.ts'
 
-const bin = fileURLToPath(new URL('../lib/bin.js', import.meta.url))
+const bin = fileURLToPath(new URL('../lib/dsh-cli.js', import.meta.url))
 const wsOptions = WebSocket as typeof WebSocket & {
   new (url: string, options: { headers: Readonly<Record<string, string>> }): WebSocket
 }
@@ -58,6 +58,39 @@ function rejectedUpgrade(origin: string, token?: string): Promise<number | undef
     socket.once('error', reject)
   })
 }
+
+it('opens a local Host and terminal with one command and reopens its session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-cli-one-window-'))
+  const home = join(root, 'home')
+  const launch = (input: string) => execa(process.execPath, [bin], {
+    cwd: root,
+    env: {
+      DSH_HOME: home,
+      DSH_AGENTS_HOME: join(root, 'agents'),
+      DSH_TELEMETRY_DISABLED: '1',
+      DSH_DAEMON_URL: undefined,
+      DSH_DAEMON_TOKEN: undefined,
+      DSH_DAEMON_TOKEN_FILE: undefined,
+      DSH_DAEMON_WORKSPACE: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      TMPDIR: root, TEMP: root, TMP: root,
+    },
+    input,
+    timeout: 45_000,
+  })
+  try {
+    const first = await launch('/status\n/new\n/exit\n')
+    expect(first.stdout).toMatch(/Host +http:\/\/127\.0\.0\.1:\d+ · 已连接/u)
+    const sessionId = /^会话 (\S+)$/mu.exec(first.stdout)?.[1]
+    expect(sessionId).toBeDefined()
+    const second = await launch('/status\n/exit\n')
+    expect(second.stdout).toContain(`会话 ${sessionId}`)
+    await expect(stat(join(home, 'local-daemon.lock'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await readdir(root)).some(name => name.startsWith('dsh-cli-local-'))).toBe(false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 it('rejects unauthenticated HTTP and WebSocket clients and resumes one shared Session from a cursor', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-daemon-'))
@@ -157,12 +190,13 @@ it('rejects unauthenticated HTTP and WebSocket clients and resumes one shared Se
     }, watchers[0].signal)
     start(second, sessionId, undefined, observe(secondEvents), watchers[1].signal)
     await vi.waitFor(() => { expect(firstEvents.length).toBeGreaterThan(0); expect(secondEvents.length).toBeGreaterThan(0) })
-    const tui = await execa(process.execPath, [bin, 'tui', '--url', origin, '--session', sessionId], {
+    const tui = await execa(process.execPath, [bin], {
       cwd: workspace,
-      env: { DSH_HOME: join(root, 'tui-home'), DSH_DAEMON_TOKEN: token },
+      env: { DSH_HOME: join(root, 'tui-home'), DSH_DAEMON_TOKEN: token, DSH_DAEMON_URL: origin },
       input: ['/status', '/model', '/image "test  screenshot.png"', '/images', 'First', '/exit'].join('\n') + '\n',
       timeout: 25_000,
     })
+    expect(tui.stdout).toContain(`会话 ${sessionId}`)
     expect(tui.stdout).toContain('API Key  已配置')
     expect(tui.stdout).toContain('deepseek-v4-flash-vision-exp')
     expect(tui.stdout).toContain('已添加 [图片：test  screenshot.png]')

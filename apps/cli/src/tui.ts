@@ -5,16 +5,32 @@ import { openAsBlob } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, extname, join } from 'node:path'
-import { clearLine, createInterface, cursorTo, type Interface, type Key } from 'node:readline'
+import { createInterface, type Interface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { stripVTControlCharacters, parseArgs } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-host-webserver'
 import { isRecord, RemoteClient, RemoteFailure, type PromptImageType, type RemoteApproval } from './remote-client.ts'
-import type { ModelSelection, SessionOpening } from './remote-contract.ts'
-import { changedFiles, compactRows, displayRows, unifiedDiff, type DisplayRow } from './remote-presentation.ts'
+import type {
+  DirectoryListing, ModelCatalog, ModelSelection, PlanSnapshot,
+  SessionEvent, SessionListValue, SessionOpening, TodoItem,
+} from './remote-contract.ts'
+import {
+  appendAssistantRow, changedFiles, compactRows, displayRows, unifiedDiff, type DisplayRow,
+} from './remote-presentation.ts'
 import { clipboardImageLimit, readClipboardImage } from './tui-clipboard.ts'
 import { commandHelp, completeCommand, readProviderKey, welcome, type TerminalStyle } from './tui-input.ts'
 import { openModelPicker } from './tui-model.ts'
+import { darkPalette, lightPalette, prefersLight, Theme, renderDiff, type Palette } from './tui-theme.ts'
+import { TerminalScreen } from './tui-screen.ts'
+import { Editor, type EditorStatus } from './tui-editor.ts'
+import { TranscriptView } from './tui-view.ts'
+import { ModelSelector, SecretPrompt, type Overlay } from './tui-overlay.ts'
+import {
+  filePanel, mcpPanel, planPanel, planText, searchPanel, settingsPanel, skillsPanel,
+  type PanelDeps, type PanelResult,
+} from './tui-panels.ts'
+import type { Block, BlockKind } from './tui-blocks.ts'
 import { TUI_VERSION } from './tui-version.ts'
 
 const imageTypes = new Map<string, PromptImageType>([
@@ -32,6 +48,16 @@ type DraftImage = ImageInfo & (
   | { readonly kind: 'clipboard'; readonly body: Blob }
 )
 
+interface RunOptions {
+  readonly client: RemoteClient
+  readonly url: string
+  readonly inventory: SessionListValue
+  readonly initialSession?: string
+  readonly signal: AbortSignal
+  readonly pasteShortcut?: string
+  readonly terminal: boolean
+}
+
 // Node 24 accepts Undici WebSocketInit in addition to the DOM protocols argument.
 const NodeWebSocket = WebSocket as typeof WebSocket & {
   new (url: string, options: { headers: Readonly<Record<string, string>> }): WebSocket
@@ -39,17 +65,19 @@ const NodeWebSocket = WebSocket as typeof WebSocket & {
 
 /** Start the terminal app after the selected profile finishes mounting.
  * @param ctx - terminal profile Cordis context.
+ * @param config - whether to connect to the Host mounted in this profile.
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config?: { local?: boolean }): void {
   const args = ctx.get('cmdlineArgs')
   const ready = ctx.get('appReady')
   const exit = ctx.get('appExit')
   if (args === undefined || ready === undefined || exit === undefined) throw new Error('dsh tui requires the profile launcher')
+  const local = config?.local === true
   const lifetime = new AbortController()
   ctx.effect(() => {
     const cancel = ready.onReady(() => {
-      void run(args.get(), lifetime.signal).then(exit, (error: unknown) => {
-        process.stderr.write(`dsh tui: ${safe(error instanceof Error ? error.message : String(error))}\n`)
+      void run(ctx, local ? [] : args.get(), lifetime.signal, local).then(exit, (error: unknown) => {
+        process.stderr.write(`dsh-cli tui: ${safe(error instanceof Error ? error.message : String(error))}\n`)
         exit(1)
       })
     })
@@ -79,7 +107,82 @@ function projectedModel(value: unknown): ModelSelection | undefined {
   return isRecord(value) ? readSelection(value.next) ?? readSelection(value.lastUsed) : undefined
 }
 
-async function run(args: readonly string[], signal: AbortSignal): Promise<number> {
+function shortCwd(): string {
+  const parts = process.cwd().split(/[\\/]/u).filter(part => part !== '')
+  return parts.length <= 2 ? join(...parts) : `${symbolsEllipsis()} ${parts.slice(-2).join('/')}`
+}
+
+function symbolsEllipsis(): string {
+  return '…'
+}
+
+/** Resolve the active Session, creating one when the client has not attached yet. */
+async function ensureSessionFor(
+  client: RemoteClient, current: () => string | undefined, attach: (id: string) => void,
+): Promise<string> {
+  const existing = current()
+  if (existing !== undefined) return existing
+  const { sessionId } = await client.create()
+  attach(sessionId)
+  return sessionId
+}
+
+interface PlanTracker {
+  snapshot(): PlanSnapshot
+  adopt(values: unknown): void
+  apply(event: SessionEvent): void
+  reset(): void
+}
+
+/** Keep the plan/todo projection current for both the full TUI and the line fallback. */
+function createPlanTracker(): PlanTracker {
+  let snapshot: PlanSnapshot = { mode: { active: false, pending: false }, todos: [] }
+  return {
+    snapshot: () => snapshot,
+    adopt: (values) => {
+      if (!isRecord(values)) return
+      const mode = isRecord(values.plan)
+        ? { active: values.plan.active === true, pending: values.plan.pending === true }
+        : snapshot.mode
+      const todos = values.todos === null ? []
+        : Array.isArray(values.todos) ? parseTodos(values.todos) : snapshot.todos
+      snapshot = { ...snapshot, mode, todos }
+    },
+    apply: (event) => {
+      const data = event.data
+      if (!isRecord(data)) return
+      if (event.type === 'plan/mode') {
+        snapshot = { ...snapshot, mode: { active: data.active === true, pending: false } }
+      } else if (event.type === 'todo/write' && Array.isArray(data.todos)) {
+        snapshot = { ...snapshot, todos: parseTodos(data.todos) }
+      }
+    },
+    reset: () => { snapshot = { mode: { active: false, pending: false }, todos: [] } },
+  }
+}
+
+function parseTodos(value: readonly unknown[]): readonly TodoItem[] {
+  return value.filter(isRecord).map(item => ({
+    content: typeof item.content === 'string' ? item.content : '',
+    status: typeof item.status === 'string' ? item.status : 'pending',
+  })).filter(item => item.content !== '')
+}
+
+function displayBlock(row: DisplayRow, live = false, elapsedMs?: number): Block {
+  const kind: BlockKind = row.kind === 'subagent' ? 'tool' : row.kind === 'file' ? 'system' : row.kind
+  return {
+    id: row.key,
+    kind,
+    title: row.title,
+    text: row.text,
+    ...(row.path === undefined ? {} : { meta: row.path }),
+    ...(row.changesSeq === undefined ? {} : { changesSeq: row.changesSeq }),
+    ...(elapsedMs === undefined ? {} : { elapsedMs }),
+    status: live ? 'running' : row.kind === 'error' ? 'error' : 'done',
+  }
+}
+
+async function run(ctx: Context, args: readonly string[], signal: AbortSignal, local: boolean): Promise<number> {
   const { values } = parseArgs({
     args: [...args],
     options: {
@@ -94,174 +197,213 @@ async function run(args: readonly string[], signal: AbortSignal): Promise<number
     process.stdout.write(`${TUI_VERSION}\n`)
     return 0
   }
-  if (values.help === true) {
-    process.stdout.write(`dsh tui [--url URL] [--session ID]\ndsh tui --version\n\n${commandHelp(process.stdout.columns)}\n`)
-    return 0
-  }
   const terminal = process.stdin.isTTY === true && process.stdout.isTTY === true
   const canRedraw = terminal && process.env.TERM !== 'dumb'
   const pasteShortcut = canRedraw ? (process.platform === 'win32' ? 'Alt+V' : 'Ctrl+V') : undefined
-  const paint: TerminalStyle = (text, ...codes) => canRedraw && process.env.NO_COLOR === undefined && text !== ''
-    ? `\u001b[${codes.join(';')}m${text}\u001b[0m`
-    : text
+  if (values.help === true) {
+    process.stdout.write(`dsh-cli tui [--url URL] [--session ID]\ndsh-cli --version\n\n${commandHelp(process.stdout.columns, pasteShortcut)}\n`)
+    return 0
+  }
   const tokenFile = process.env.DSH_DAEMON_TOKEN_FILE
   const token = process.env.DSH_DAEMON_TOKEN ?? (tokenFile === undefined ? '' : (await readFile(tokenFile, 'utf8')).trimEnd())
-  const url = values.url ?? process.env.DSH_DAEMON_URL ?? 'http://127.0.0.1:3080'
-  if (terminal) process.stdout.write(welcome(process.stdout.columns, new URL(url).host, paint, pasteShortcut))
+  const localOrigin = local ? ctx.get('webServer')?.getOrigin() : undefined
+  if (local && localOrigin === undefined) throw new Error('本地 Host 未启动')
+  const url = localOrigin ?? values.url ?? process.env.DSH_DAEMON_URL ?? 'http://127.0.0.1:3080'
   const client = new RemoteClient(url, token, {
     id: randomUUID,
-    socket: (url, headers) => new NodeWebSocket(url, { headers }),
+    socket: (address, headers) => new NodeWebSocket(address, { headers }),
   })
   const inventory = await client.list()
   if (signal.aborted) return 0
-  let input: Interface | undefined
+  const options: RunOptions = {
+    client, url, inventory, signal, terminal,
+    ...(pasteShortcut === undefined ? {} : { pasteShortcut }),
+    ...(typeof values.session === 'string' || typeof values.resume === 'string'
+      ? { initialSession: (values.session ?? values.resume) as string } : {}),
+  }
+  return canRedraw ? runTerminal(options) : runLine(options)
+}
+
+/** Full-screen style interactive client with a dock, live blocks and overlays. */
+async function runTerminal(options: RunOptions): Promise<number> {
+  const { client, url, inventory, signal, pasteShortcut = 'Ctrl+V' } = options
+  let palette: Palette = prefersLight() ? lightPalette : darkPalette
+  let theme = new Theme(palette, process.env.NO_COLOR === undefined)
+  const screen = new TerminalScreen(process.stdin, process.stdout)
+  const finished = Promise.withResolvers<number>()
+  const ui: { view?: TranscriptView } = {}
   let selected: string | undefined
   let model: ModelSelection | undefined
   let connection = '已连接'
-  let pickerOutput: ((text: string) => void) | undefined
-  let paste: Promise<void> | undefined
-  let handling = false
+  let connected = true
+  let imageLimits: SessionOpening['projections']['values']['imageLimits']
+  let approvals: readonly RemoteApproval[] = []
+  let watch: AbortController | undefined
   const drafts = new Map<string | undefined, DraftImage[]>()
   const images = (): readonly DraftImage[] => drafts.get(selected) ?? []
-  const prompt = (): string => {
-    const count = images().length
-    const marker = canRedraw ? paint('›', 94) : 'dsh >'
-    return count === 0 ? `${marker} ` : `${paint(`[${count} 图]`, 2)} ${marker} `
-  }
-  const openInput = (): Interface => createInterface({
-    input: process.stdin, output: process.stdout, terminal, prompt: prompt(), completer: completeCommand,
+  let activeId: string | undefined
+  let streamRows: readonly DisplayRow[] = []
+  let turnStartedAt = 0
+  let lastFlushAt = 0
+  let flushTimer: NodeJS.Timeout | undefined
+  let suppressUntil = 0
+  const plan = createPlanTracker()
+
+  const status = (): EditorStatus => ({
+    model: model === undefined ? 'Host 默认模型' : `${model.provider}/${model.model}`,
+    session: selected === undefined ? '未选择会话' : `会话 ${selected.slice(0, 8)}`,
+    cwd: shortCwd(),
+    connection,
+    connected,
+    expanded: ui.view?.isExpanded ?? false,
+    streaming: editor.isStreaming,
+    attachments: images().length,
+    version: `v${TUI_VERSION}`,
+    pasteShortcut,
   })
-  const redrawPrompt = (): void => {
-    if (!terminal || input === undefined) return
-    if (canRedraw) {
-      clearLine(process.stdout, 0)
-      cursorTo(process.stdout, 0)
-    }
-    input.setPrompt(prompt())
-    input.prompt(canRedraw)
+
+  const editor = new Editor({
+    submit: (text) => { void handle(text) },
+    cancel: () => { void cancelTurn() },
+    exit: () => { finished.resolve(0) },
+    toggleExpanded: () => { ui.view?.toggleExpanded() },
+    pasteImage: () => { void pasteImage() },
+  })
+  const view = new TranscriptView(screen, editor, theme, status)
+  ui.view = view
+  view.start()
+  view.banner(new URL(url).host)
+
+  const commit = (row: DisplayRow, live = false, elapsedMs?: number): void => {
+    if (live) { view.setLive([displayBlock(row, true)]); return }
+    view.commit(displayBlock(row, false, elapsedMs))
   }
-  const print = (text: string): void => {
-    if (pickerOutput !== undefined) {
-      pickerOutput(text)
-      return
-    }
-    if (canRedraw && input !== undefined) {
-      clearLine(process.stdout, 0)
-      cursorTo(process.stdout, 0)
-    }
-    process.stdout.write(`${text}\n`)
-    if (canRedraw) redrawPrompt()
+
+  const renderLive = (): void => {
+    lastFlushAt = Date.now()
+    view.setLive(streamRows.map(row => displayBlock(row, true, Date.now() - turnStartedAt)))
   }
-  const paintDiff = (text: string): string => safe(text).split('\n').map((line) => {
-    if (line.startsWith('+')) return paint(line, 32)
-    if (line.startsWith('-')) return paint(line, 31)
-    return line.startsWith('@@') ? paint(line, 36) : line
-  }).join('\n')
-  const markdown = (text: string): string => safe(text)
-    .replace(/^#{1,6}[ \t]+(.+)$/gmu, (_match, heading: string) => paint(heading, 36))
-    .replace(/\*\*([^*\n]+)\*\*/gu, (_match, bold: string) => paint(bold, 1))
-    .replace(/`([^`\n]+)`/gu, (_match, code: string) => paint(code, 33))
-  let imageLimits: SessionOpening['projections']['values']['imageLimits']
-  let watch: AbortController | undefined
-  let approvals: readonly RemoteApproval[] = []
-  let thinking = false
-  const thoughts: DisplayRow[] = []
-  const render = (row: DisplayRow): void => {
-    if (row.kind === 'reasoning') {
-      thoughts.push(row)
-      if (thoughts.length > 100) thoughts.shift()
-      if (!thinking) return
-    }
-    const text = row.kind === 'diff' ? paintDiff(row.text)
-      : row.kind === 'changes' ? `${safe(row.text)} · /diff ${String(row.changesSeq)}`
-        : row.kind === 'assistant' || row.kind === 'user' ? markdown(row.text)
-          : safe(row.text)
-    print(`${paint(safe(row.title), row.kind === 'error' ? 31 : 36)}\n${text}`)
+
+  const scheduleLive = (): void => {
+    if (flushTimer !== undefined) return
+    const wait = Math.max(0, 50 - (Date.now() - lastFlushAt))
+    flushTimer = setTimeout(() => { flushTimer = undefined; renderLive() }, wait)
   }
+
+  const finishLive = (): void => {
+    if (flushTimer !== undefined) { clearTimeout(flushTimer); flushTimer = undefined }
+    const rows = streamRows
+    const elapsedMs = Date.now() - turnStartedAt
+    // The durable journal repeats the same text right after the live stream ends.
+    suppressUntil = Date.now() + 4000
+    view.clearLive()
+    for (const row of rows) commit(row, false, elapsedMs)
+    view.setStreaming(false)
+    activeId = undefined
+    streamRows = []
+  }
+
   const attach = (id: string): void => {
     watch?.abort()
     watch = new AbortController()
-    const local = watch.signal
+    const localSignal = watch.signal
+    plan.reset()
     if (selected === undefined) {
       const draft = drafts.get(undefined)
-      if (draft !== undefined) {
-        drafts.set(id, draft)
-        drafts.delete(undefined)
-      }
+      if (draft !== undefined) { drafts.set(id, draft); drafts.delete(undefined) }
     }
     selected = id
     connection = '连接中'
+    connected = false
     imageLimits = undefined
     const summary = inventory.items.find(item => item.sessionId === id)?.projections?.values
     model = summary !== undefined && 'modelSelection' in summary ? projectedModel(summary.modelSelection) : undefined
     approvals = []
-    thoughts.length = 0
-    print(`会话 ${safe(id)}`)
+    activeId = undefined
+    streamRows = []
+    suppressUntil = 0
+    if (flushTimer !== undefined) { clearTimeout(flushTimer); flushTimer = undefined }
+    view.setStreaming(false)
+    view.setLive([])
+    view.system(`会话 ${safe(id)}`)
     let cursor: number | undefined
     let retries = 0
-    let activeId: string | undefined
     const follow = async (): Promise<void> => {
-      while (!local.aborted) {
+      while (!localSignal.aborted) {
         try {
           await client.follow(id, cursor, {
             opening: (opening) => {
               cursor = opening.cursor
               retries = 0
               connection = '已连接'
+              connected = true
               imageLimits = opening.projections.values.imageLimits
               model = projectedModel(opening.projections.values.modelSelection)
-              for (const event of opening.events) displayRows(event).forEach(render)
+              plan.adopt(opening.projections.values)
+              for (const event of opening.events) {
+                for (const row of displayRows(event)) commit(row)
+              }
               const attempt = opening.assistantStream?.activeAttempt
-              activeId = attempt?.attemptId
-              if (attempt !== undefined) compactRows(attempt.stream, attempt.attemptId).forEach(render)
+              if (attempt !== undefined) {
+                activeId = attempt.attemptId
+                streamRows = compactRows(attempt.stream, attempt.attemptId)
+                turnStartedAt = Date.now()
+                view.setStreaming(true)
+                renderLive()
+              }
             },
             event: (event) => {
               cursor = event.seq
               if (event.type === 'model/selection') model = readSelection(event.data) ?? model
-              displayRows(event).forEach(render)
+              plan.apply(event)
+              for (const row of displayRows(event)) {
+                if (Date.now() < suppressUntil && (row.kind === 'assistant' || row.kind === 'reasoning')) continue
+                commit(row)
+              }
             },
             assistant: (frame) => {
-              if (frame.type === 'start') activeId = frame.attemptId
-              if (frame.type === 'end') activeId = undefined
-              if (frame.type === 'chunk' && frame.attemptId === activeId) compactRows([frame.chunk], frame.attemptId).forEach(render)
+              if (frame.type === 'start') {
+                activeId = frame.attemptId
+                streamRows = []
+                turnStartedAt = Date.now()
+                view.setStreaming(true)
+                renderLive()
+              } else if (frame.type === 'chunk' && frame.attemptId === activeId) {
+                streamRows = appendAssistantRow(streamRows, frame.chunk, frame.attemptId)
+                scheduleLive()
+              } else if (frame.type === 'end' && frame.attemptId === activeId) {
+                finishLive()
+              }
             },
             approvals: (items) => {
               const previous = new Set(approvals.map(item => item.id))
               approvals = items
               for (const item of items) {
-                if (!previous.has(item.id)) print(safe(`待审批 ${item.id}\n${item.sessionId} · ${item.tool}\n${item.reason}`))
+                if (previous.has(item.id)) continue
+                view.commit({
+                  id: `approval:${item.id}`, kind: 'approval', title: item.tool,
+                  text: `${item.sessionId}  ·  ${item.reason}`, meta: item.id, status: 'running',
+                })
               }
             },
-          }, local)
+          }, localSignal)
         } catch (error) {
-          if (local.aborted) return
+          if (localSignal.aborted) return
           connection = '连接断开'
-          print(safe(error instanceof Error ? error.message : String(error)))
+          connected = false
+          view.system(safe(error instanceof Error ? error.message : String(error)), 'error')
           if (error instanceof RemoteFailure && (error.code === 'session/not-found' || error.code.startsWith('session/cursor-'))) return
-          await delay(Math.min(500 * 2 ** retries, 10_000), undefined, { signal: local })
+          await delay(Math.min(500 * 2 ** retries, 10_000), undefined, { signal: localSignal })
           retries += 1
         }
       }
     }
     void follow().catch((error: unknown) => {
-      if (!local.aborted) print(safe(error instanceof Error ? error.message : String(error)))
+      if (!localSignal.aborted) view.system(safe(error instanceof Error ? error.message : String(error)), 'error')
     })
   }
-  const showSessions = async (): Promise<void> => {
-    const { items } = await client.list()
-    print(items.length === 0 ? '还没有会话' : items.map((session) => {
-      const status = session.running ? '运行中' : session.blank ? '空会话' : '历史'
-      const values = session.projections?.values
-      const title = values !== undefined && 'title' in values ? values.title : undefined
-      return safe(`${session.sessionId === selected ? '*' : ' '} ${status}  ${session.sessionId}  ${typeof title === 'string' ? title : session.cwd ?? ''}`)
-    }).join('\n'))
-  }
-  const ensureSession = async (): Promise<string> => {
-    if (selected !== undefined) return selected
-    const { sessionId } = await client.create()
-    attach(sessionId)
-    return sessionId
-  }
+
+
   const checkImageBudget = (size: number, staged: readonly DraftImage[]): void => {
     const maxImageBytes = imageLimits?.maxImageBytes ?? clipboardImageLimit
     const maxImages = imageLimits?.maxImagesPerMessage ?? 20
@@ -271,28 +413,18 @@ async function run(args: readonly string[], signal: AbortSignal): Promise<number
       throw new Error('图片或待发送附件超过图片限额')
     }
   }
+
   const pasteImage = async (): Promise<void> => {
     const body = await readClipboardImage(signal)
-    if (body === undefined) {
-      print('剪贴板里没有图片')
-      return
-    }
+    if (body === undefined) { view.system('剪贴板里没有图片'); return }
     const staged = images()
     checkImageBudget(body.size, staged)
     const name = `clipboard-${randomUUID().slice(0, 8)}.png`
     drafts.set(selected, [...staged, { kind: 'clipboard', name, size: body.size, body }])
-    print('已粘贴 [剪贴板图片]，回车随文字发送')
+    view.system('已粘贴 [剪贴板图片]，回车随文字发送')
+    view.refresh()
   }
-  const onPaste = (_value: string | undefined, key: Key): void => {
-    if (key.name !== 'v' || (!key.ctrl && !key.meta) || paste !== undefined) return
-    if (handling) {
-      print('当前操作完成后再粘贴图片')
-      return
-    }
-    paste = pasteImage().catch((error: unknown) => {
-      if (!signal.aborted) print(safe(error instanceof Error ? error.message : String(error)))
-    }).finally(() => { paste = undefined })
-  }
+
   const stageImage = async (argument: string): Promise<void> => {
     if (argument === '') throw new Error('用法 /image 路径')
     const supplied = unquotePath(argument)
@@ -301,19 +433,20 @@ async function run(args: readonly string[], signal: AbortSignal): Promise<number
     if (mediaType === undefined) throw new Error('支持 PNG、JPEG、WebP 和 GIF 图片')
     const info = await stat(path)
     if (!info.isFile() || info.size === 0) throw new Error('请选择一个非空图片文件')
-    const sessionId = await ensureSession()
+    const sessionId = await ensureSessionFor(client, () => selected, attach)
     const staged = drafts.get(sessionId) ?? []
     const body = await openAsBlob(path, { type: mediaType })
     checkImageBudget(body.size, staged)
     const name = basename(path)
-    print(safe(`正在上传 ${name}…`))
+    view.system(`正在上传 ${safe(name)}…`)
     const receipt = await client.uploadImage(sessionId, body, mediaType, name, signal)
     drafts.set(sessionId, [...staged, { kind: 'uploaded', name, receipt, size: body.size }])
-    print(safe(`已添加 [图片：${name}]，输入文字发送，或用 /send 单独发送`))
+    view.system(`已添加 [图片：${safe(name)}]，输入文字发送，或用 /send 单独发送`)
   }
+
   const send = async (text: string): Promise<void> => {
-    const sessionId = await ensureSession()
-    const staged = drafts.get(sessionId) ?? []
+    const sessionId = await ensureSessionFor(client, () => selected, attach)
+    const staged = [...(drafts.get(sessionId) ?? [])]
     const receipts: string[] = []
     for (const [index, image] of staged.entries()) {
       if (image.kind === 'uploaded') receipts.push(image.receipt)
@@ -325,127 +458,421 @@ async function run(args: readonly string[], signal: AbortSignal): Promise<number
     }
     await client.prompt(sessionId, text, receipts)
     drafts.delete(sessionId)
+    view.refresh()
+  }
+
+  const cancelTurn = async (): Promise<void> => {
+    if (selected === undefined) return
+    try {
+      await client.cancel(selected)
+      view.system('已中断当前回答')
+    } catch (error) {
+      view.system(`中断失败：${safe(error instanceof Error ? error.message : String(error))}`, 'error')
+    }
+  }
+
+  const changeModel = async (selection: ModelSelection): Promise<void> => {
+    const result = await client.selectModel(await ensureSessionFor(client, () => selected, attach), selection)
+    model = result
+    view.system(`已选择 ${result.provider} / ${result.model}`)
+    view.refresh()
+  }
+
+  const openModel = async (argument: string): Promise<void> => {
+    if (argument !== '') {
+      const [provider, id, extra] = argument.split(/\s+/u)
+      if (provider === undefined || id === undefined || extra !== undefined) throw new Error('用法 /model 提供方 模型')
+      await changeModel({ provider, model: id })
+      return
+    }
+    const catalog: ModelCatalog = await client.modelCatalog()
+    if (catalog.groups.every(group => group.models.length === 0)) {
+      view.system('Host 未提供可切换的模型，先用 /login 配置 API Key', 'error')
+      return
+    }
+    const selector = new ModelSelector(catalog, model, catalog.default)
+    selector.setCurrent(model ?? catalog.default)
+    const choice = await view.showOverlay(selector, selector.result)
+    if (choice !== undefined && !signal.aborted) await changeModel(choice)
+  }
+
+  const openLogin = async (): Promise<void> => {
+    const prompt = new SecretPrompt()
+    const key = await view.showOverlay(prompt, prompt.result)
+    if (key === undefined) { view.system('已取消 API Key 配置'); return }
+    await client.setProviderKey(key, signal)
+    view.system('DeepSeek API Key 已保存到 Host')
+  }
+
+  const showSessions = async (): Promise<void> => {
+    const { items } = await client.list()
+    if (items.length === 0) { view.system('还没有会话'); return }
+    view.commitRaw([
+      `  ${theme.bold('textStrong', '会话')}`,
+      ...items.map((session) => {
+        const state = session.running ? '运行中' : session.blank ? '空会话' : '历史'
+        const values = session.projections?.values
+        const title = values !== undefined && 'title' in values ? values.title : undefined
+        const marker = session.sessionId === selected ? theme.fg('success', '●') : theme.fg('textMuted', '○')
+        return `  ${marker} ${theme.fg('textDim', state)}  ${theme.fg('text', session.sessionId.slice(0, 12))}  ${theme.fg('textDim', safe(typeof title === 'string' ? title : session.cwd ?? ''))}`
+      }),
+      '',
+    ])
+  }
+
+  const showStatus = async (): Promise<void> => {
+    const key = await client.providerKeyStatus()
+    view.commitRaw([
+      `  ${theme.bold('textStrong', '状态')}`,
+      `    Host      ${theme.fg('textDim', new URL(url).origin)} · ${theme.fg(connected ? 'success' : 'warning', connection)}`,
+      `    会话      ${theme.fg('textDim', selected ?? '尚未选择')}`,
+      `    模型      ${theme.fg('textDim', model === undefined ? 'Host 默认模型' : `${model.provider} / ${model.model}`)}`,
+      `    API Key   ${theme.fg(key.configured ? 'success' : 'warning', key.configured ? '已配置' : '未配置 · /login')}`,
+      '',
+    ])
+  }
+
+  const panelDeps: PanelDeps = {
+    client,
+    signal,
+    sessionId: () => ensureSessionFor(client, () => selected, attach),
+    snapshot: () => plan.snapshot(),
+  }
+
+  const applyPanelResult = (result: PanelResult): void => {
+    switch (result.kind) {
+      case 'insert':
+        editor.setText(result.text)
+        view.system('已填入输入框，回车发送')
+        break
+      case 'submit': void handle(result.text); break
+      case 'session': attach(result.id); break
+    }
+  }
+
+  const showPanel = async (
+    panel: Overlay & { readonly result: Promise<PanelResult | undefined> },
+  ): Promise<void> => {
+    const result = await view.showOverlay(panel, panel.result)
+    if (result !== undefined && !signal.aborted) applyPanelResult(result)
+  }
+
+  const handle = async (line: string): Promise<void> => {
+    const [, command = '', argument = ''] = /^(\S+)(?:\s+([\s\S]+))?$/u.exec(line.trim()) ?? []
+    const rest = argument.split(/\s+/u)
+    try {
+      switch (command) {
+        case '':
+          if (images().length !== 0) await send('')
+          break
+        case '/quit':
+        case '/exit': finished.resolve(0); break
+        case '/':
+        case '/help': view.help(); break
+        case '/compact': view.compact(); view.system('已收起较早的输出'); break
+        case '/skills': await showPanel(skillsPanel(panelDeps)); break
+        case '/mcp': await showPanel(mcpPanel(panelDeps)); break
+        case '/plan': await showPanel(planPanel(panelDeps)); break
+        case '/search': await showPanel(searchPanel(panelDeps, argument)); break
+        case '/files':
+          await showPanel(filePanel(panelDeps, argument === '' ? '' : unquotePath(argument)))
+          break
+        case '/settings': await showPanel(settingsPanel(panelDeps)); break
+        case '/sessions': await showSessions(); break
+        case '/attach':
+          if (argument === '') throw new Error('输入 /attach ID')
+          attach(argument)
+          break
+        case '/new': attach((await client.create(argument === '' ? undefined : unquotePath(argument))).sessionId); break
+        case '/image': await stageImage(argument); break
+        case '/paste': await pasteImage(); break
+        case '/images':
+          if (argument === 'clear') { drafts.delete(selected); view.system('已清空待发送图片') }
+          else if (argument !== '') throw new Error('用法 /images [clear]')
+          else view.system(images().map(image => `[图片：${safe(image.name)}]`).join('\n') || '没有待发送图片')
+          break
+        case '/send':
+          if (argument !== '' || images().length === 0) throw new Error('先用 /image 添加图片，再输入 /send')
+          await send('')
+          break
+        case '/login': await openLogin(); break
+        case '/status': await showStatus(); break
+        case '/model': await openModel(argument); break
+        case '/theme': {
+          const mode = rest[0] ?? (palette === darkPalette ? 'light' : 'dark')
+          palette = mode === 'light' ? lightPalette : darkPalette
+          theme = new Theme(palette, process.env.NO_COLOR === undefined)
+          view.setPalette(palette, process.env.NO_COLOR === undefined)
+          view.system(`已切换到 ${mode === 'light' ? '浅色' : '深色'}配色`)
+          break
+        }
+        case '/thinking': view.toggleExpanded(); break
+        case '/diff': {
+          const [seq, index] = rest
+          if (selected === undefined || seq === undefined || !/^\d+$/u.test(seq)
+            || (index !== undefined && !/^\d+$/u.test(index))) throw new Error('输入 /diff SEQ [文件序号]')
+          const result = await client.changes(selected, Number(seq), index === undefined ? undefined : Number(index))
+          if (index === undefined) {
+            for (const file of changedFiles(result)) view.system(`${String(file.index)}  ${file.label}`)
+          } else {
+            view.commitRaw(renderDiff(unifiedDiff(result), screen.columns - 1, view.currentTheme))
+          }
+          break
+        }
+        case '/approve':
+        case '/deny':
+          if (!approvals.some(item => item.id === argument)) throw new Error('审批已结束或 ID 不存在')
+          await client.answer(argument, command === '/approve' ? 'allowed-once' : 'rejected')
+          break
+        default:
+          if (command.startsWith('/')) throw new Error('未知命令。输入 /help 查看命令')
+          await send(line)
+      }
+    } catch (error) {
+      view.system(safe(error instanceof Error ? error.message : String(error)), 'error')
+    }
+    view.refresh()
+  }
+
+  const initial = options.initialSession ?? inventory.items.find(item => item.origin !== 'subagent')?.sessionId
+  if (initial !== undefined) attach(initial)
+  else view.system('直接输入开始对话，或用 /new 指定服务器工作目录')
+
+  const onAbort = (): void => { finished.resolve(0) }
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await finished.promise
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+    watch?.abort()
+    view.stop()
+  }
+}
+
+/** Line-oriented fallback for dumb terminals, pipes and scripted input. */
+async function runLine(options: RunOptions): Promise<number> {
+  const { client, url, inventory, signal, pasteShortcut, terminal } = options
+  const columns = Number.isFinite(process.stdout.columns) ? process.stdout.columns : 80
+  const paint: TerminalStyle = (text, ...codes) => terminal && process.env.NO_COLOR === undefined && text !== ''
+    ? `\u001b[${codes.join(';')}m${text}\u001b[0m` : text
+  if (terminal) process.stdout.write(welcome(process.stdout.columns, new URL(url).host, paint, pasteShortcut))
+  let input: Interface | undefined
+  let selected: string | undefined
+  let model: ModelSelection | undefined
+  let connection = '已连接'
+  let pickerOutput: ((text: string) => void) | undefined
+  let watch: AbortController | undefined
+  let activeId: string | undefined
+  let streamRows: readonly DisplayRow[] = []
+  const plan = createPlanTracker()
+  const drafts = new Map<string | undefined, DraftImage[]>()
+  const images = (): readonly DraftImage[] => drafts.get(selected) ?? []
+  const prompt = (): string => images().length === 0 ? '› ' : `[${String(images().length)} 图] › `
+  const openInput = (): Interface => createInterface({
+    input: process.stdin, output: process.stdout, terminal, prompt: prompt(), completer: completeCommand,
+  })
+  const print = (text: string): void => {
+    if (pickerOutput !== undefined) { pickerOutput(text); return }
+    process.stdout.write(`${text}\n`)
+    input?.prompt(true)
+  }
+  const commit = (row: DisplayRow): void => {
+    const title = paint(safe(row.title), row.kind === 'error' ? 31 : 36)
+    const body = row.kind === 'diff' ? renderDiff(row.text, columns, new Theme(darkPalette, false)).join('\n')
+      : row.kind === 'changes' ? `${safe(row.text)} · /diff ${String(row.changesSeq)}` : safe(row.text)
+    print(`${title}\n${body}`)
+  }
+  const attach = (id: string): void => {
+    watch?.abort()
+    watch = new AbortController()
+    const localSignal = watch.signal
+    plan.reset()
+    selected = id
+    connection = '连接中'
+    const summary = inventory.items.find(item => item.sessionId === id)?.projections?.values
+    model = summary !== undefined && 'modelSelection' in summary ? projectedModel(summary.modelSelection) : undefined
+    print(`会话 ${safe(id)}`)
+    let cursor: number | undefined
+    let retries = 0
+    const follow = async (): Promise<void> => {
+      while (!localSignal.aborted) {
+        try {
+          await client.follow(id, cursor, {
+            opening: (opening) => {
+              cursor = opening.cursor
+              connection = '已连接'
+              model = projectedModel(opening.projections.values.modelSelection)
+              plan.adopt(opening.projections.values)
+              for (const event of opening.events) displayRows(event).forEach(commit)
+              const attempt = opening.assistantStream?.activeAttempt
+              if (attempt !== undefined) {
+                activeId = attempt.attemptId
+                streamRows = compactRows(attempt.stream, attempt.attemptId)
+              }
+            },
+            event: (event) => {
+              cursor = event.seq
+              if (event.type === 'model/selection') model = readSelection(event.data) ?? model
+              plan.apply(event)
+              displayRows(event).forEach(commit)
+            },
+            assistant: (frame) => {
+              if (frame.type === 'start') { activeId = frame.attemptId; streamRows = [] }
+              else if (frame.type === 'chunk' && frame.attemptId === activeId) {
+                streamRows = appendAssistantRow(streamRows, frame.chunk, frame.attemptId)
+              } else if (frame.type === 'end' && frame.attemptId === activeId) {
+                streamRows.forEach(commit)
+                streamRows = []
+                activeId = undefined
+              }
+            },
+            approvals: (items) => {
+              for (const item of items) print(safe(`待审批 ${item.id}\n${item.sessionId} · ${item.tool}\n${item.reason}`))
+            },
+          }, localSignal)
+        } catch (error) {
+          if (localSignal.aborted) return
+          connection = '连接断开'
+          print(safe(error instanceof Error ? error.message : String(error)))
+          if (error instanceof RemoteFailure && (error.code === 'session/not-found' || error.code.startsWith('session/cursor-'))) return
+          await delay(Math.min(500 * 2 ** retries, 10_000), undefined, { signal: localSignal })
+          retries += 1
+        }
+      }
+    }
+    void follow().catch((error: unknown) => {
+      if (!localSignal.aborted) print(safe(error instanceof Error ? error.message : String(error)))
+    })
   }
   const changeModel = async (selection: ModelSelection): Promise<void> => {
-    const result = await client.selectModel(await ensureSession(), selection)
+    const result = await client.selectModel(await ensureSessionFor(client, () => selected, attach), selection)
     model = result
     print(safe(`已选择 ${result.provider} / ${result.model}`))
   }
-  const close = (): void => {
-    process.stdin.removeListener('keypress', onPaste)
-    watch?.abort()
-    input?.close()
+  const handle = async (line: string): Promise<'continue' | 'login' | 'model' | 'exit'> => {
+    const [, command = '', argument = ''] = /^(\S+)(?:\s+([\s\S]+))?$/u.exec(line.trim()) ?? []
+    const rest = argument.split(/\s+/u)
+    try {
+      switch (command) {
+        case '': if (images().length !== 0) await client.prompt(await ensureSessionFor(client, () => selected, attach), ''); break
+        case '/quit': case '/exit': return 'exit'
+        case '/': case '/help': print(commandHelp(process.stdout.columns, pasteShortcut)); break
+        case '/sessions': print((await client.list()).items.map(item => safe(item.sessionId)).join('\n') || '还没有会话'); break
+        case '/skills': {
+          const { skills } = await client.skills(await ensureSessionFor(client, () => selected, attach))
+          print(safe(skills.map(skill => `/${skill.name}  ${skill.description}`).join('\n') || '没有可用技能'))
+          break
+        }
+        case '/mcp': {
+          const servers = await client.mcpServers(signal)
+          print(safe(servers.map(server =>
+            `${server.name}  ${typeof server.status.state === 'string' ? server.status.state : 'unknown'}`
+            + (server.configured ? '' : '  (配置已移除)'))
+            .join('\n') || '没有 MCP 服务'))
+          break
+        }
+        case '/plan': {
+          const id = await ensureSessionFor(client, () => selected, attach)
+          const document = await client.planDocument(id).catch(() => undefined)
+          print(safe(planText(plan.snapshot(), document)))
+          break
+        }
+        case '/search': {
+          const hits = argument.trim() === ''
+            ? (await client.list()).items.map(item =>
+              `${item.sessionId}  ${typeof item.cwd === 'string' ? item.cwd : '已有会话'}`)
+            : (await client.searchSessions(argument)).items.map(item => `${item.sessionId}  ${item.snippet}`)
+          print(safe(hits.join('\n') || '没有匹配的会话'))
+          break
+        }
+        case '/files': {
+          const listing = await client.workspaceFiles(argument === '' ? '' : unquotePath(argument), 'list') as DirectoryListing
+          print(safe(listing.entries.map(entry => `${entry.kind === 'directory' ? '目录' : '文件'}  ${entry.name}`)
+            .join('\n') || '目录为空'))
+          break
+        }
+        case '/settings': {
+          const described = await client.settingsDescribe()
+          print(safe(described.namespaces.map(namespace =>
+            `${namespace.ns}  revision ${String(namespace.revision)}`).join('\n') || '没有配置命名空间'))
+          break
+        }
+        case '/compact':
+        case '/thinking':
+        case '/theme':
+        case '/paste':
+        case '/image':
+        case '/images':
+        case '/send':
+          print('该命令需要支持重绘的交互式终端（TERM 不能为 dumb）')
+          break
+        case '/approve':
+        case '/deny':
+          if (argument === '') throw new Error('输入审批 ID')
+          await client.answer(argument, command === '/approve' ? 'allowed-once' : 'rejected')
+          break
+        case '/attach': if (argument === '') throw new Error('输入 /attach ID'); attach(argument); break
+        case '/new': attach((await client.create(argument === '' ? undefined : unquotePath(argument))).sessionId); break
+        case '/status': {
+          const key = await client.providerKeyStatus()
+          print(safe([
+            `Host     ${new URL(url).origin} · ${connection}`,
+            `会话     ${selected ?? '尚未选择'}`,
+            `模型     ${model === undefined ? 'Host 默认模型' : `${model.provider} / ${model.model}`}`,
+            `API Key  ${key.configured ? '已配置' : '未配置 · /login'}`,
+          ].join('\n')))
+          break
+        }
+        case '/model':
+          if (argument === '') {
+            if (terminal) return 'model'
+            const catalog = await client.modelCatalog()
+            print(safe([`Host 默认  ${catalog.default.provider} / ${catalog.default.model}`,
+              ...catalog.groups.flatMap(group => group.models.map(item => `  ${group.id}  ${item.id}  ${item.name}`))].join('\n')))
+          } else {
+            const [provider, id, extra] = rest
+            if (provider === undefined || id === undefined || extra !== undefined) throw new Error('用法 /model 提供方 模型')
+            await changeModel({ provider, model: id })
+          }
+          break
+        case '/login':
+          if (!terminal) throw new Error('请在交互式终端中运行 /login')
+          return 'login'
+        case '/diff': {
+          const [seq, index] = rest
+          if (selected === undefined || seq === undefined || !/^\d+$/u.test(seq)) throw new Error('输入 /diff SEQ [文件序号]')
+          const result = await client.changes(selected, Number(seq), index === undefined ? undefined : Number(index))
+          if (index === undefined) for (const file of changedFiles(result)) print(safe(`${String(file.index)}  ${file.label}`))
+          else print(renderDiff(unifiedDiff(result), columns, new Theme(darkPalette, false)).join('\n'))
+          break
+        }
+        default:
+          if (command.startsWith('/')) throw new Error('未知命令。输入 /help 查看命令')
+          await client.prompt(await ensureSessionFor(client, () => selected, attach), line)
+      }
+    } catch (error) {
+      print(safe(error instanceof Error ? error.message : String(error)))
+    }
+    return 'continue'
   }
+  const close = (): void => { watch?.abort(); input?.close() }
   signal.addEventListener('abort', close, { once: true })
   try {
-    const initial = values.session ?? values.resume ?? inventory.items.find(item => item.origin !== 'subagent')?.sessionId
+    const initial = options.initialSession ?? inventory.items.find(item => item.origin !== 'subagent')?.sessionId
     if (initial !== undefined) attach(initial)
     else if (!terminal) print('直接输入开始对话，或用 /new 指定服务器工作目录')
-    const handle = async (line: string): Promise<'continue' | 'login' | 'model' | 'exit'> => {
-      const [, command = '', argument = ''] = /^(\S+)(?:\s+([\s\S]+))?$/u.exec(line.trim()) ?? []
-      const rest = argument.split(/\s+/u)
-      try {
-        switch (command) {
-          case '':
-            if (images().length !== 0) await send('')
-            break
-          case '/quit':
-          case '/exit': return 'exit'
-          case '/':
-          case '/help': print(commandHelp(process.stdout.columns, pasteShortcut)); break
-          case '/sessions': await showSessions(); break
-          case '/attach':
-            if (argument === '') throw new Error('输入 /attach ID')
-            attach(argument)
-            break
-          case '/new': attach((await client.create(argument === '' ? undefined : unquotePath(argument))).sessionId); break
-          case '/image': await stageImage(argument); break
-          case '/paste': await pasteImage(); break
-          case '/images':
-            if (argument === 'clear') {
-              drafts.delete(selected)
-              print('已清空待发送图片')
-            } else if (argument !== '') throw new Error('用法 /images [clear]')
-            else print(images().map(image => safe(`[图片：${image.name}]`)).join('\n') || '没有待发送图片')
-            break
-          case '/send':
-            if (argument !== '' || images().length === 0) throw new Error('先用 /image 添加图片，再输入 /send')
-            await send('')
-            break
-          case '/login':
-            if (argument !== '') throw new Error('输入 /login 后在隐藏提示中填写 API Key')
-            if (!terminal) throw new Error('请在交互式终端中运行 /login')
-            return 'login'
-          case '/status': {
-            const status = await client.providerKeyStatus()
-            print(safe([
-              `Host     ${new URL(url).origin} · ${connection}`,
-              `会话     ${selected ?? '尚未选择'}`,
-              `模型     ${model === undefined ? 'Host 默认模型' : `${model.provider} / ${model.model}`}`,
-              `API Key  ${status.configured ? '已配置' : '未配置 · /login'}`,
-            ].join('\n')))
-            break
-          }
-          case '/model': {
-            if (argument === '') {
-              if (canRedraw) return 'model'
-              const catalog = await client.modelCatalog()
-              const options = catalog.groups.flatMap(group => group.models.map(item => `  ${group.id}  ${item.id}  ${item.name}`))
-              print(safe([`Host 默认  ${catalog.default.provider} / ${catalog.default.model}`, ...options, '用法 /model 提供方 模型'].join('\n')))
-            } else {
-              const [provider, id, extra] = rest
-              if (provider === undefined || id === undefined || extra !== undefined) throw new Error('用法 /model 提供方 模型')
-              await changeModel({ provider, model: id })
-            }
-            break
-          }
-          case '/thinking':
-            thinking = !thinking
-            if (thinking) for (const row of thoughts) print(`${row.title}\n${safe(row.text)}`)
-            else print('思考过程已收起')
-            break
-          case '/diff': {
-            const [seq, index] = rest
-            if (selected === undefined || seq === undefined || !/^\d+$/u.test(seq)
-              || (index !== undefined && !/^\d+$/u.test(index))) throw new Error('输入 /diff SEQ [文件序号]')
-            const result = await client.changes(selected, Number(seq), index === undefined ? undefined : Number(index))
-            if (index === undefined) {
-              for (const file of changedFiles(result)) print(safe(`${file.index}  ${file.label}`))
-            } else print(paintDiff(unifiedDiff(result)))
-            break
-          }
-          case '/approve':
-          case '/deny':
-            if (!approvals.some(item => item.id === argument)) throw new Error('审批已结束或 ID 不存在')
-            await client.answer(argument, command === '/approve' ? 'allowed-once' : 'rejected')
-            break
-          default:
-            if (command.startsWith('/')) throw new Error('未知命令。输入 /help 查看命令')
-            await send(line)
-        }
-      } catch (error) {
-        print(safe(error instanceof Error ? error.message : String(error)))
-      }
-      return 'continue'
-    }
     while (!signal.aborted) {
       input = openInput()
-      if (canRedraw) process.stdin.on('keypress', onPaste)
       if (terminal) input.prompt()
       let modal: 'login' | 'model' | undefined
       for await (const line of input) {
-        await paste
         if (signal.aborted) return 0
-        handling = true
-        const action = await handle(line).finally(() => { handling = false })
+        const action = await handle(line)
         if (action === 'exit') return 0
-        if (action === 'login' || action === 'model') {
-          modal = action
-          break
-        }
-        redrawPrompt()
+        if (action === 'login' || action === 'model') { modal = action; break }
+        input.setPrompt(prompt())
+        input.prompt(true)
       }
-      process.stdin.removeListener('keypress', onPaste)
       input.close()
       input = undefined
       if (modal === undefined) break
@@ -460,10 +887,7 @@ async function run(args: readonly string[], signal: AbortSignal): Promise<number
         } else {
           const key = await readProviderKey(signal)
           if (key === undefined) print('已取消 API Key 配置')
-          else {
-            await client.setProviderKey(key, signal)
-            print('DeepSeek API Key 已保存到 Host')
-          }
+          else { await client.setProviderKey(key, signal); print('DeepSeek API Key 已保存到 Host') }
         }
       } catch (error) {
         print(safe(error instanceof Error ? error.message : String(error)))

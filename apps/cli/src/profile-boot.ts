@@ -37,6 +37,7 @@ import { installProxyFromEnvironment } from '@deepseek-ai/dsh-http-proxy'
 import { DSH_LAUNCH_ENVIRONMENT_KEY, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { provideCmdline, type AppReady } from '@deepseek-ai/dsh-cmdline'
 import { createProcessShutdown, type ProcessShutdown } from './process-shutdown.ts'
+import type { LocalTerminal } from './tui-local.ts'
 
 const NAME = 'dsh'
 
@@ -267,6 +268,8 @@ export interface RunProfileOptions {
   patchFiles: readonly string[]
   /** The invocation's inner arguments, handed to the tree through `ctx.cmdlineArgs`. */
   args: readonly string[]
+  /** Mount the terminal client alongside its local loopback Host. */
+  localTerminal?: LocalTerminal | undefined
   /** Application-owned package runtime, scoped to plugin package operations. */
   packageManager?: ProfileContext['packageManager']
 }
@@ -279,26 +282,24 @@ export interface RunProfileOptions {
  * @throws after disposing startup resources; cleanup failures retain the original error.
  */
 export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Context; shutdown: ProcessShutdown }> {
-  // Before the first plugin mounts and before anything can issue a request: Node's fetch ignores the
-  // proxy environment on its own, so every profile would otherwise connect directly. Resolving from
-  // the launcher's snapshot — not `process.env` — is what lets a proxy declared in a `.env` layer
-  // work, which the NODE_USE_ENV_PROXY flag cannot do because Node samples the environment at start.
-  const disposeProxy = await installProxyFromEnvironment(
-    options.environment,
-    (message) => { process.stderr.write(`${NAME}: ${message}\n`) },
-  )
-
   const app: { current?: Context } = {}
+  let disposeProxy: (() => Promise<void>) | undefined
   let disposal: Promise<void> | undefined
   const dispose = (): Promise<void> => disposal ??= (async () => {
     const failures: unknown[] = []
-    for (const release of [() => app.current?.fiber.dispose(), disposeProxy]) {
+    for (const release of [() => app.current?.fiber.dispose(), () => disposeProxy?.(), () => options.localTerminal?.close()]) {
       try { await release() } catch (error) { failures.push(error) }
     }
     if (failures.length === 1) throw failures[0]
     if (failures.length > 1) throw new AggregateError(failures, 'dsh: profile cleanup failed')
   })()
   try {
+    // Install proxy policy before any plugins issue requests. Resolve it from the launch snapshot
+    // so a proxy declared in a .env layer works even though Node samples its own proxy settings at startup.
+    disposeProxy = await installProxyFromEnvironment(
+      options.environment,
+      (message) => { process.stderr.write(`${NAME}: ${message}\n`) },
+    )
     const composed = await composeProfile(
       options.profile, options.patchFiles, options.fromDefaultProfile, options.resolvedProfile,
     )
@@ -316,9 +317,7 @@ export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Con
     // complete; SIGINT is a user interrupt and reports 130.
     process.on('SIGTERM', () => { interrupt(0) })
     process.on('SIGINT', () => { interrupt(130) })
-    installFailLoud(NAME, process, async () => {
-      await app.current?.fiber.dispose()
-    })
+    installFailLoud(NAME, process, dispose)
 
     const rootConfig = join(composed.profile.dir, PROFILE_ROOT_FILENAME)
     const profileContext: ProfileContext = {
@@ -355,6 +354,10 @@ export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Con
     if (!signalShutdown.signal.aborted
       && ctx.fiber.state === FiberState.ACTIVE
       && ctx.get('loader') !== undefined) {
+      if (options.localTerminal !== undefined) {
+        const tui = await import('./tui.ts')
+        await ctx.plugin(tui, { local: true })
+      }
       appReady.commit()
     }
     return { ctx, shutdown }

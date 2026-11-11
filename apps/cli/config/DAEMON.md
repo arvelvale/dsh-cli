@@ -1,22 +1,28 @@
 # DSH 守护进程与远程客户端
 
-`dsh daemon` 使用同一套 Web Host、Gateway 和会话存储为 TUI 与移动端提供服务。它在前台运行，由 systemd 管理，固定监听 `127.0.0.1`。一个 `DSH_HOME` 只运行一个写入会话的 Host。客户端退出后，正在执行的 turn 继续由 Host 管理。
+## 本机单窗口
+
+在项目目录运行 `dsh-cli`。从源码检出运行时用 `pnpm dsh-cli`，需要 Node.js 24.9 或更新版本。CLI 在同一进程中启动仅监听回环地址的 Host，自动生成临时 Token，然后打开对话。用 `/login` 配置 DeepSeek API Key。用 `/exit` 退出时，本地 Host 一起关闭。默认数据目录是 `~/.dsh-cli`，下次运行可以接续会话，也可以用 `DSH_HOME` 指定数据目录。
+
+## 常驻 Daemon
+
+`dsh-cli daemon` 使用同一套 Web Host、Gateway 和会话存储为 TUI 与移动端提供服务。它在前台运行，由 systemd 管理，固定监听 `127.0.0.1`。一个 `DSH_HOME` 只运行一个写入会话的 Host。客户端退出后，正在执行的 turn 继续由 Host 管理。
 
 ## 在 Linux 启动
 
 1. 在仓库根目录使用 Node 24.9+ 和仓库指定的 pnpm 版本，运行 `pnpm install --frozen-lockfile` 和 `pnpm run build`。
 2. 准备一个专用服务用户、可写的工作区和独立的 `DSH_HOME`。用 `umask 077; node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))' > daemon-token` 生成 43 字符 Token 文件。模型凭证继续通过 Host 配置提供。
-3. 设置 `DSH_DAEMON_TOKEN_FILE` 指向该文件。需要导出工作区文件时，将 `DSH_DAEMON_WORKSPACE` 设为要导出的目录。从工作区执行 `node /opt/deepseek-harness/apps/cli/lib/bin.js daemon --port 3080 --trusted-host dsh.example.com`。
+3. 设置 `DSH_DAEMON_TOKEN_FILE` 指向该文件。需要导出工作区文件时，将 `DSH_DAEMON_WORKSPACE` 设为要导出的目录。从工作区执行 `node /opt/deepseek-harness/apps/cli/lib/dsh-cli.js daemon --port 3080 --trusted-host dsh.example.com`。
 4. 长期运行时，按实际目录、Node 路径、服务用户和域名调整 [systemd 服务](dsh-daemon.service)。将 Token 放在 `LoadCredential` 指定的位置，将模型环境变量放入可选的 `provider.env`。安装后运行 `systemctl daemon-reload` 和 `systemctl enable --now dsh-daemon`，用 `journalctl -u dsh-daemon` 查看启动信息。
 5. 按域名及证书位置调整 [Nginx 模板](dsh-nginx.conf)，执行 `nginx -t`，再由 Nginx 暴露 HTTPS 和 WSS。默认只转发客户端使用的 HTTP 接口与原生 WebSocket 路由。更换 Token 文件后重启 Daemon。
 
 ## 连接
 
-在 SSH 中设置 `DSH_DAEMON_TOKEN_FILE` 指向客户端可读的 Token 文件，运行 `dsh tui` 或 `dsh tui --session <id>`。也可使用 `--url https://dsh.example.com` 连接 Nginx。输入 `/help` 查看会话切换、思考折叠、Git 差异和审批命令。源码检出中使用 `pnpm dsh tui`。
+在 SSH 中设置 `DSH_DAEMON_TOKEN_FILE` 指向客户端可读的 Token 文件，运行 `dsh-cli tui` 或 `dsh-cli tui --session <id>`。也可使用 `dsh-cli tui --url https://dsh.example.com` 连接 Nginx。输入 `/help` 查看会话切换、思考折叠、Git 差异和审批命令。源码检出中使用 `pnpm dsh-cli tui`。
 
-交互式终端启动时在蓝色的 `DSH CLI` 字标旁显示客户端版本，也可以运行 `dsh tui --version` 查看。输入 `/` 后连按两次 Tab 可列出命令，继续输入前缀可缩小候选范围。用 `/status` 查看连接、当前会话、模型和 API Key 是否已配置。用 `/login` 打开隐藏输入，保存的 DeepSeek API Key 由 Host 的原有凭证服务管理，并用于后续模型请求。Daemon Token 仍通过启动环境或 Token 文件提供。
+交互式终端启动时在蓝色的 `DSH CLI` 字标旁显示客户端版本，也可以运行 `dsh-cli --version` 查看。输入 `/` 后连按两次 Tab 可列出命令，继续输入前缀可缩小候选范围。用 `/status` 查看连接、当前会话、模型和 API Key 是否已配置。用 `/login` 打开隐藏输入，保存的 DeepSeek API Key 由 Host 的原有凭证服务管理，并用于后续模型请求。Daemon Token 仍通过启动环境或 Token 文件提供。
 
-在输入框里按 `Alt+V`（Windows）或 `Ctrl+V`（macOS、Linux），也可用 `/paste` 将剪贴板图片加入草稿。回车时图片与文字一同发送，只有图片时也可以直接回车。用 `/images` 查看附件，`/images clear` 清空草稿。Windows 使用系统剪贴板，macOS 需要 `pngpaste`，Linux 桌面使用 `wl-paste`（Wayland）或 `xclip`（X11）。剪贴板属于运行 TUI 的机器。连接远端 Daemon 时可在自己的桌面终端运行 `dsh tui --url https://dsh.example.com`，粘贴电脑上的截图。
+在输入框里按 `Alt+V`（Windows）或 `Ctrl+V`（macOS、Linux），也可用 `/paste` 将剪贴板图片加入草稿。回车时图片与文字一同发送，只有图片时也可以直接回车。用 `/images` 查看附件，`/images clear` 清空草稿。Windows 使用系统剪贴板，macOS 需要 `pngpaste`，Linux 桌面使用 `wl-paste`（Wayland）或 `xclip`（X11）。剪贴板属于运行 TUI 的机器。连接远端 Daemon 时可在自己的桌面终端运行 `dsh-cli tui --url https://dsh.example.com`，粘贴电脑上的截图。
 
 用 `/image "/path/to/screenshot.png"` 添加文件。通过 SSH 启动 TUI 时，路径指向 SSH 服务器上的文件。命令支持 PNG、JPEG、WebP 和 GIF。发送图片时，模型须支持图像输入。
 

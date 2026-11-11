@@ -7,32 +7,61 @@ import { TUI_VERSION } from './tui-version.ts'
 
 export type TerminalStyle = (text: string, ...codes: number[]) => string
 
-const commands = [
-  ['会话', [
-    ['/new', '[服务器目录]', '新建会话'],
-    ['/sessions', '', '查看会话列表'],
-    ['/attach', 'ID', '接续指定会话'],
-    ['/thinking', '', '展开或收起思考'],
-    ['/diff', 'SEQ [序号]', '查看工作区差异'],
-  ]],
-  ['输入与附件', [
-    ['/image', '路径', '添加终端所在机器的图片'],
-    ['/paste', '', '从本机剪贴板添加图片'],
-    ['/images', '[clear]', '列出或清空待发送图片'],
-    ['/send', '', '只发送待发送图片'],
-  ]],
-  ['配置与审批', [
-    ['/login', '', '隐藏输入并保存 DeepSeek API Key'],
-    ['/model', '[提供方 模型]', '用方向键选择模型，或直接指定模型'],
-    ['/status', '', '查看连接、会话和 API Key 状态'],
-    ['/approve', 'ID', '仅允许本次工具调用'],
-    ['/deny', 'ID', '拒绝工具调用'],
-  ]],
-  ['帮助', [
-    ['/help', '', '显示命令帮助'],
-    ['/exit', '', '退出终端客户端（也可用 /quit）'],
-  ]],
-] as const
+/** One slash command shown in completions and help. */
+export interface CommandEntry {
+  readonly name: string
+  readonly args: string
+  readonly description: string
+}
+
+/** A labelled group of slash commands. */
+export interface CommandGroup {
+  readonly heading: string
+  readonly entries: readonly CommandEntry[]
+}
+
+export const commandDescriptors: readonly CommandGroup[] = [
+  { heading: '会话', entries: [
+    { name: '/new', args: '[服务器目录]', description: '新建会话' },
+    { name: '/sessions', args: '', description: '查看会话列表' },
+    { name: '/attach', args: 'ID', description: '接续指定会话' },
+    { name: '/thinking', args: '', description: '展开或收起思考' },
+    { name: '/diff', args: 'SEQ [序号]', description: '查看工作区差异' },
+    { name: '/compact', args: '', description: '收起历史输出' },
+  ] },
+  { heading: '浏览与工作区', entries: [
+    { name: '/skills', args: '', description: '浏览并调用 Host 技能' },
+    { name: '/mcp', args: '', description: '管理 MCP 服务' },
+    { name: '/plan', args: '', description: '查看计划与任务清单' },
+    { name: '/search', args: '[关键词]', description: '搜索并接续会话' },
+    { name: '/files', args: '[路径]', description: '浏览工作区文件' },
+    { name: '/settings', args: '', description: '查看 Host 配置' },
+  ] },
+  { heading: '输入与附件', entries: [
+    { name: '/image', args: '路径', description: '添加本机图片' },
+    { name: '/paste', args: '', description: '粘贴剪贴板图片' },
+    { name: '/images', args: '[clear]', description: '列出或清空待发送图片' },
+    { name: '/send', args: '', description: '只发送待发送图片' },
+  ] },
+  { heading: '配置与审批', entries: [
+    { name: '/login', args: '', description: '隐藏输入并保存 API Key' },
+    { name: '/model', args: '[提供方 模型]', description: '选择或指定模型' },
+    { name: '/theme', args: '[dark|light]', description: '切换配色' },
+    { name: '/status', args: '', description: '查看连接与配置状态' },
+    { name: '/approve', args: 'ID', description: '允许本次工具调用' },
+    { name: '/deny', args: 'ID', description: '拒绝工具调用' },
+  ] },
+  { heading: '帮助', entries: [
+    { name: '/help', args: '', description: '显示命令帮助' },
+    { name: '/exit', args: '', description: '退出终端客户端' },
+    { name: '/quit', args: '', description: '退出终端客户端' },
+  ] },
+]
+
+const commands = commandDescriptors.map(group => [
+  group.heading,
+  group.entries.map(entry => [entry.name, entry.args, entry.description] as const),
+] as const)
 
 /**
  * @param width - available terminal columns, defaulting to 80 for redirected output.
@@ -58,8 +87,8 @@ export function commandHelp(width = 80, pasteShortcut?: string): string {
  */
 export function completeCommand(line: string): [string[], string] {
   if (!/^\/[a-z]*$/u.test(line)) return [[], line]
-  const names = commands.flatMap(([, group]) => group.map(([name]) => name))
-  return [[...names, '/quit'].filter(name => name.startsWith(line)), line]
+  const names = commandDescriptors.flatMap(group => group.entries.map(entry => entry.name))
+  return [names.filter(name => name.startsWith(line)), line]
 }
 
 /** Sanitize a label and fit it into the remaining terminal columns. */
@@ -102,6 +131,11 @@ export function welcome(width: number, host: string, paint: TerminalStyle, paste
   ].join('\n') + '\n'
 }
 
+/** Keep the AbortSignal check outside the type-narrowed call site. */
+function wasCancelled(signal: AbortSignal): boolean {
+  return signal.aborted
+}
+
 /**
  * Read a secret using an independent TTY editor with neither output nor history.
  * The caller must close its ordinary editor before invoking this function.
@@ -123,7 +157,7 @@ export async function readProviderKey(signal: AbortSignal): Promise<string | und
     const key = (await editor.question('', { signal: lifetime })).trim()
     return key === '' ? undefined : key
   } catch (error) {
-    if (lifetime.aborted) return undefined
+    if (wasCancelled(lifetime)) return undefined
     throw error
   } finally {
     editor.close()

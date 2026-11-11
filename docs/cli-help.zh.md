@@ -219,8 +219,8 @@ Example:
 调用方式: `dsh tui --help`, `dsh --profile tui --help`
 
 ```text
-dsh tui [--url URL] [--session ID]
-dsh tui --version
+dsh-cli tui [--url URL] [--session ID]
+dsh-cli --version
 
 会话
   /new [服务器目录]           新建会话
@@ -228,21 +228,32 @@ dsh tui --version
   /attach ID                  接续指定会话
   /thinking                   展开或收起思考
   /diff SEQ [序号]            查看工作区差异
+  /compact                    收起历史输出
+
+浏览与工作区
+  /skills                     浏览并调用 Host 技能
+  /mcp                        管理 MCP 服务
+  /plan                       查看计划与任务清单
+  /search [关键词]            搜索并接续会话
+  /files [路径]               浏览工作区文件
+  /settings                   查看 Host 配置
 
 输入与附件
-  /image 路径                 添加终端所在机器的图片
-  /paste                      从本机剪贴板添加图片
+  /image 路径                 添加本机图片
+  /paste                      粘贴剪贴板图片
   /images [clear]             列出或清空待发送图片
   /send                       只发送待发送图片
 
 配置与审批
-  /login                      隐藏输入并保存 DeepSeek API Key
-  /model [提供方 模型]        用方向键选择模型，或直接指定模型
-  /status                     查看连接、会话和 API Key 状态
-  /approve ID                 仅允许本次工具调用
+  /login                      隐藏输入并保存 API Key
+  /model [提供方 模型]        选择或指定模型
+  /theme [dark|light]         切换配色
+  /status                     查看连接与配置状态
+  /approve ID                 允许本次工具调用
   /deny ID                    拒绝工具调用
 
 帮助
   /help                       显示命令帮助
-  /exit                       退出终端客户端（也可用 /quit）
+  /exit                       退出终端客户端
+  /quit                       退出终端客户端
 ```

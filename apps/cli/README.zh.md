@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-`dsh` 是唯一受支持的 Node 应用启动器；profile 由多个插件组合包 patch 层按顺序叠加而成，其上再应用用户自己的覆盖配置。SDK 与 ACP（Agent Client Protocol）都是 profile，而不是独立的公开可执行命令。Python 运行时 wheel 包中也包含同一个命令；SDK 默认使用 `sdk`，极简示例选择 `sdk-minimal`。[`src/args.ts`](src/args.ts) 负责命令语法，[`src/bin.ts`](src/bin.ts) 只加载选中的运行器。无效命令、来自其他模式的选项，以及致命的配置或启动错误都会以非零状态退出。
+DSH CLI 安装后使用 `dsh-cli` 命令。它复用 `dsh` 的 profile 启动器。profile 由多个插件组合包 patch 层按顺序叠加而成，其上再应用用户自己的覆盖配置。SDK 和 ACP（Agent Client Protocol）通过同一个启动器以 profile 方式运行。Python 运行时 wheel 包包含 `dsh`，SDK 默认使用 `sdk`，极简示例选择 `sdk-minimal`。[`src/args.ts`](src/args.ts) 负责命令语法，[`src/bin.ts`](src/bin.ts) 只加载选中的运行器。无效命令、来自其他模式的选项，以及致命的配置或启动错误都会以非零状态退出。
 
 ## 入口模式
 
@@ -15,9 +15,12 @@
 | `dsh --profile sdk` | 通过 JSON-RPC stdio 为 SDK 客户端提供服务，直至关闭或断开连接。 |
 | `dsh --profile sdk-minimal` | 以独立极简 agent（智能体）配置树为 SDK 客户端提供服务。 |
 | `dsh web` | 启动 Web profile。 |
-| `dsh daemon` | 启动供[已认证远程客户端](config/DAEMON.md)连接的回环 Host。 |
-| `dsh tui` | 用交互式终端接续 Daemon 中的会话。 |
+| `dsh-cli daemon` | 启动供[已认证远程客户端](config/DAEMON.md)连接的回环 Host。 |
+| `dsh-cli` | 在同一个窗口打开本地 Host 和交互式终端。已设置 Daemon 连接信息时，接入指定的 Host。 |
+| `dsh-cli tui` | 用交互式终端接续 Daemon 中的会话。 |
 | `dsh plugin --profile <name> <pnpm args>` | 通过在 profile 目录中转发给 pnpm 来管理该 profile 的插件。 |
+
+`dsh-cli` 或 `dsh-cli tui` 运行期间，该进程写到 stderr 的文本，以及不属于输入框重绘的 stdout，会接到输入框上方，然后重新画出输入框。
 
 运行命令时所在的目录将作为默认 workspace 根目录。`web`、`headless`、`sdk`、`sdk-minimal` 和 `acp` profile 在首次使用时会从随附模板自动初始化。使用 `--from-default-profile` 可以基于这些模板之一，在非内置名称处创建或重置其他 profile；通过 `dsh plugin` 则可以初始化一个以 base 为基础的 profile。`desktop` 名称保留给 Electron 持有的 profile，因此 CLI（命令行界面）会拒绝针对它的启动和配置 dump 请求。npm CLI 也会拒绝其插件管理请求；[Desktop 内置命令](../desktop/README.zh.md#bundled-command-runtime)可以使用该安装的运行时管理已初始化的 Desktop profile。
 

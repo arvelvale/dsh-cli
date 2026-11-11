@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The `dsh` command is the sole supported Node application launcher: profiles are ordered stacks of plugin-bundle patch layers under the user's own overrides. SDK and ACP are profiles, not separate public bins. The Python runtime wheel packages this same command; the SDK defaults to `sdk`, and the minimal example selects `sdk-minimal`. [`src/args.ts`](src/args.ts) owns the command grammar, and [`src/bin.ts`](src/bin.ts) loads only the selected runner. Invalid commands, options from another mode, and fatal configuration or boot failures exit nonzero.
+DSH CLI installs the `dsh-cli` command. It uses the shared `dsh` profile launcher, whose profiles are ordered stacks of plugin-bundle patch layers under the user's own overrides. SDK and ACP run as profiles through the shared launcher. The Python runtime wheel packages `dsh`; the SDK defaults to `sdk`, and the minimal example selects `sdk-minimal`. [`src/args.ts`](src/args.ts) owns the command grammar, and [`src/bin.ts`](src/bin.ts) loads only the selected runner. Invalid commands, options from another mode, and fatal configuration or boot failures exit nonzero.
 
 ## Entry modes
 
@@ -15,9 +15,12 @@ The `dsh` command is the sole supported Node application launcher: profiles are 
 | `dsh --profile sdk` | Serve SDK clients over JSON-RPC stdio until shutdown or disconnect. |
 | `dsh --profile sdk-minimal` | Serve SDK clients with the standalone minimal agent tree. |
 | `dsh web` | Boot the Web profile. |
-| `dsh daemon` | Start the loopback Host for [authenticated remote clients](config/DAEMON.md). |
-| `dsh tui` | Attach an interactive terminal to a running daemon. |
+| `dsh-cli daemon` | Start the loopback Host for [authenticated remote clients](config/DAEMON.md). |
+| `dsh-cli` | Open an interactive terminal with a local Host. With Daemon connection settings, attach to the configured Host. |
+| `dsh-cli tui` | Attach an interactive terminal to a running daemon. |
 | `dsh plugin --profile <name> <pnpm args>` | Manage a profile's plugins by forwarding to pnpm in the profile directory. |
+
+While `dsh-cli` or `dsh-cli tui` is running, text that process writes to stderr, and stdout that is not the prompt redraw, is appended above the prompt and the prompt is drawn again.
 
 The invoking directory is the default workspace root. The `web`, `headless`, `sdk`, `sdk-minimal`, and `acp` profiles auto-initialize on first use from shipped templates. Create or reset another profile at a non-shipped name with `--from-default-profile`, or initialize a base-backed profile through `dsh plugin`. The `desktop` name is reserved for the Electron-owned profile, so the CLI rejects boot and config-dump requests for it. The npm CLI also rejects its plugin-management requests; the [Desktop-installed command](../desktop/README.md#bundled-command-runtime) can manage the initialized Desktop profile using that installation’s runtime.
 
