@@ -26,7 +26,7 @@ daemon 只监听回环，Caddy 只转发 `/api/*`，其余 404；`flush_interval
 - 远端 `origin` 是上游 `deepseek-ai/deepseek-harness`；你自己的仓库是 `dsh-cli`
   (`https://github.com/arvelvale/dsh-cli.git`)，**PUBLIC**，默认分支 `main`，你有 ADMIN 权限。
 - 本地 `master` 基于上游历史，比 `origin/master` 领先若干提交（新的 TUI、六个浮层、
-  本部署目录）。这些提交**还没有推到 `dsh-cli`**，用 `git log dsh-cli/main..master` 可核对。
+  本部署目录）。最新代码以快照提交发布在 `deploy/seoul` 分支；`main` 仍是 0.0.1 快照。
 - `dsh-cli/main` 是「导入 DSH CLI 0.0.1 源码快照」，与本地 `master` **没有共同祖先**。
   所以 `git push dsh-cli master:main` 会 non-fast-forward 被拒。默认做法是推到独立部署分支
   `deploy/seoul`，不动 `main` 和 `v0.0.1` tag；服务器按这个分支 clone。
@@ -49,7 +49,8 @@ daemon 只监听回环，Caddy 只转发 `/api/*`，其余 404；`flush_interval
 
 ### 1. 开发机：把代码发布到部署分支
 
-`deploy/` 已随本地 `master` 的提交纳入版本管理。开发继续在 `master` 上做，发布用一条命令：
+首次发布已完成，`deploy/seoul` 分支已存在。开发继续在 `master` 上做，之后每次改动用下面
+这条命令追加一条新快照提交：
 
 ```bash
 cd D:/bigproject/dsh-cli
