@@ -112,6 +112,8 @@ Caddy 自动向 Let's Encrypt 申请并续期证书，0 元。
 `pnpm install --frozen-lockfile` → 建 `dsh` 服务用户与 256bit 随机 Token →
 写 systemd unit 与 Caddyfile → 放行 ufw → 启动并自检。幂等，可重复运行。
 
+覆盖 systemd unit 与 Caddyfile 前，脚本会备份现有文件到 `/opt/dsh/backups/setup-<UTC时间>/`。配置文件保持 `0644`，Token 与模型凭证保持 `0600`；重复执行会重启 daemon 使配置生效。
+
 **运行方式**：systemd 用 `node --import tsx/esm apps/cli/src/dsh-cli.ts daemon ...` 直接跑源码，
 而不是 `pnpm run build` 产物。完整 build 会编译 native addon 并构建 Web/Desktop，
 在 2 核 8GB 上耗时长且易失败；源码 + tsx 这条路径已在本机 Node 24 下真实跑通过 TUI。
@@ -149,7 +151,10 @@ Daemon Token: <43 字符随机串>
 systemctl status dsh-daemon caddy
 journalctl -u dsh-daemon -n 50
 journalctl -u caddy -n 50
-curl -H "Authorization: Bearer <TOKEN>" https://<DOMAIN>/api/session/list
+curl -X POST -H "Authorization: Bearer <TOKEN>" \
+  -H 'Content-Type: application/json' \
+  --data '{"type":"client-request","method":"session/list","rpcId":"deploy-check","payload":{"args":{"_request":{}}}}' \
+  https://<DOMAIN>/api/session/list
 ```
 
 手机浏览器打开域名应看到 404（说明 Caddy 已起、证书有效、非 `/api` 路径被挡）。

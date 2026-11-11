@@ -2,6 +2,7 @@
 # Executed on the server with sudo, from inside the cloned repository.
 # Called by bootstrap.sh install, but safe to re-run on its own (idempotent).
 set -euo pipefail
+umask 022
 
 DOMAIN="${1:?用法: setup.sh <HTTPS 域名>}"
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -79,8 +80,18 @@ if [[ ! -f /etc/dsh/provider.env ]]; then
 fi
 
 echo "==> 6/8 写入 systemd unit 与 Caddyfile"
+umask 022
+BACKUP="/opt/dsh/backups/setup-$(date -u +%Y%m%dT%H%M%SZ)"
+install -d -m 700 "$BACKUP"
+for config in /etc/systemd/system/dsh-daemon.service /etc/caddy/Caddyfile; do
+  if [[ -f "$config" ]]; then
+    cp -a "$config" "$BACKUP/$(basename "$config")"
+  fi
+done
 sed "s/__DOMAIN__/${DOMAIN}/g" "$HERE/dsh-daemon.service.template" > /etc/systemd/system/dsh-daemon.service
 sed "s/__DOMAIN__/${DOMAIN}/g" "$HERE/Caddyfile.template" > /etc/caddy/Caddyfile
+chmod 644 /etc/systemd/system/dsh-daemon.service /etc/caddy/Caddyfile
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl daemon-reload
 
 echo "==> 7/8 放行本机防火墙（云控制台的防火墙仍需单独放行 80/443）"
@@ -90,7 +101,8 @@ ufw allow 443/tcp >/dev/null
 ufw --force enable >/dev/null 2>&1 || true
 
 echo "==> 8/8 启动服务"
-systemctl enable --now dsh-daemon
+systemctl enable dsh-daemon
+systemctl restart dsh-daemon
 systemctl restart caddy
 sleep 3
 systemctl is-active dsh-daemon
@@ -100,6 +112,8 @@ TOKEN="$(cat /etc/dsh/daemon-token)"
 echo
 echo "==> 自检（证书首次签发需要公网 80 可达，可能要等 1-2 分钟）"
 curl -sS --fail --resolve "${DOMAIN}:443:127.0.0.1" \
+  -X POST -H 'Content-Type: application/json' \
+  --data '{"type":"client-request","method":"session/list","rpcId":"deploy-check","payload":{"args":{"_request":{}}}}' \
   -H "Authorization: Bearer ${TOKEN}" \
   "https://${DOMAIN}/api/session/list" | head -c 300 \
   || echo "（暂时不可用：查看 journalctl -u caddy -u dsh-daemon -n 50）"
