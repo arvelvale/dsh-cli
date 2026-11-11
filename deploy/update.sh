@@ -34,6 +34,7 @@ echo "    $OLD -> $NEW"
 if [[ "$OLD" != "$NEW" ]]; then
   echo "==> 同步依赖"
   PATH="$NODE_DIR/bin:$PATH" pnpm install --frozen-lockfile
+  bash "$REPO/deploy/prepare-host.sh"
   echo "==> 重启 daemon"
   systemctl restart dsh-daemon
   sleep 2

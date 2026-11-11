@@ -61,6 +61,7 @@ fi
 cd "$REPO"
 git log -1 --oneline
 PATH="$NODE_DIR/bin:$PATH" pnpm install --frozen-lockfile
+bash "$HERE/prepare-host.sh"
 
 echo "==> 5/8 创建服务用户、目录与随机 Token"
 if ! id -u dsh >/dev/null 2>&1; then

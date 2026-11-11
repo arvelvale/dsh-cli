@@ -116,9 +116,7 @@ Caddy 自动向 Let's Encrypt 申请并续期证书，0 元。
 
 Ubuntu 22.04 的 systemd 249 使用 `/run/credentials/%n/daemon-token` 作为凭据路径，避免依赖新版 `%d` 展开。启动后以鉴权 `session/list` RPC 返回成功作为就绪条件；仅进程处于 active 不代表 Host 已经加载完成。
 
-**运行方式**：systemd 用 `node --import tsx/esm apps/cli/src/dsh-cli.ts daemon ...` 直接跑源码，
-而不是 `pnpm run build` 产物。完整 build 会编译 native addon 并构建 Web/Desktop，
-在 2 核 8GB 上耗时长且易失败；源码 + tsx 这条路径已在本机 Node 24 下真实跑通过 TUI。
+**运行方式**：systemd 用 `node --import tsx/esm apps/cli/src/dsh-cli.ts daemon ...` 跑源码。安装和更新时，`prepare-host.sh` 会先构建本机 native addon，再运行仓库的 `host-contracts` 生成 Typert 元数据并编译 Host 包。即使用 tsx 启动也需要这些运行时产物；省略会导致元数据加载失败，并可能影响会话落盘。这里跳过 Web/Desktop 打包，适用于 2 核 8GB 服务器。
 
 ### 4. 日常更新
 
@@ -127,7 +125,7 @@ ssh -t ubuntu@<SERVER_IP> "sudo bash /opt/dsh/repo/deploy/update.sh"
 ```
 
 开发机 `bash deploy/publish.sh` 发布新快照 → 服务器 fetch → 若 HEAD 变化则
-`pnpm install --frozen-lockfile` + `systemctl restart dsh-daemon`；无变化则跳过。
+`pnpm install --frozen-lockfile` + `prepare-host.sh` + `systemctl restart dsh-daemon`；无变化则跳过。
 工作树有本地改动时会拒绝覆盖并提示。
 
 ## 手机 App 配置
